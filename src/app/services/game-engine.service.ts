@@ -31,6 +31,8 @@ export class GameEngineService {
   private lastTime = 0;
   private lastPassTime = 0; // ms timestamp of last pass
   private passCooldown = 2500; // ms between passes
+  // Dynamic cooldown tuning (will shorten if midfield stagnates)
+  private basePassCooldown = 2500;
   // Possession protection mechanics
   private possessionLockOwner: string | null = null;
   private possessionLockUntil = 0; // timestamp in ms
@@ -38,6 +40,8 @@ export class GameEngineService {
   private team1: Team | null = null;
   private team2: Team | null = null;
   private gameDuration = environment.gameSettings.defaultGameDuration;
+  // Track lack of forward progression to avoid endless ping-pong backward passes
+  private consecutiveNonAdvancingPasses = 0;
 
   getGameState(): Observable<GameState> {
     return this.gameState$.asObservable();
@@ -385,16 +389,50 @@ export class GameEngineService {
         player.abilities.stamina = Math.max(0, player.abilities.stamina - decay);
       }
       if (player.role === 'goalkeeper') {
-        // Goalkeeper: track ball vertically, modest horizontal shift when ball enters attacking half
-        const targetY = Math.max(40, Math.min(fieldHeight - 40, ballPos.y));
-        const horizAdjust = Math.abs(ballPos.x - player.position.x) < fieldWidth * 0.55 ? (ballPos.x - player.position.x) * 0.004 : 0;
-        player.position.x += horizAdjust * baseMove;
-        player.position.y += (targetY - player.position.y) * 0.06 * baseMove;
-        // Constrain keeper to a corridor near its goal (detect team by membership)
+        // Differentiated goalkeeper AI
         const isLeftKeeper = !!this.team1 && this.team1.players.includes(player);
-        player.position.x = isLeftKeeper
-          ? Math.max(30, Math.min(120, player.position.x))
-          : Math.max(fieldWidth - 120, Math.min(fieldWidth - 30, player.position.x));
+        const defendingHalf = isLeftKeeper ? (ballPos.x < fieldWidth * 0.6) : (ballPos.x > fieldWidth * 0.4);
+        const dangerZone = isLeftKeeper ? (ballPos.x < 220) : (ballPos.x > fieldWidth - 220);
+        // Anticipation: look slightly ahead of current ball y using velocity
+        const anticipateY = ballPos.y + ballPos.vy * 4; // look-ahead factor
+        const clampedAnticipateY = Math.max(60, Math.min(fieldHeight - 60, anticipateY));
+        // Base vertical tracking speed slower when ball is far from goal, faster in danger zone
+        const verticalSpeed = (dangerZone ? 0.10 : defendingHalf ? 0.06 : 0.035) * baseMove;
+        player.position.y += (clampedAnticipateY - player.position.y) * verticalSpeed;
+        // Depth positioning: move off the line when ball further out to cut angles
+        const baseLineX = isLeftKeeper ? 50 : fieldWidth - 50;
+        const maxAdvance = 70; // how far off line keeper can roam
+        const ballDistToGoal = Math.abs(ballPos.x - baseLineX);
+        const advanceRatio = 1 - Math.min(1, ballDistToGoal / 500); // closer ball -> higher ratio
+        const targetDepth = baseLineX + (isLeftKeeper ? 1 : -1) * maxAdvance * advanceRatio;
+        // Slight lateral centering toward ball y lane candidate (simulate angle play)
+        const depthLerp = dangerZone ? 0.09 : 0.04;
+        player.position.x += (targetDepth - player.position.x) * depthLerp * baseMove;
+        // Reaction delay: if ball just changed direction (sign flip in vx), hesitate
+        if (!('_lastBallVx' in (player as any))) (player as any)._lastBallVx = ballPos.vx;
+        const lastVx = (player as any)._lastBallVx as number;
+        const directionFlipped = (lastVx > 0 && ballPos.vx < 0) || (lastVx < 0 && ballPos.vx > 0);
+        if (directionFlipped && !('_reactFreeze' in (player as any))) {
+          (player as any)._reactFreeze = Date.now() + 250 + Math.random() * 200; // 250-450ms pause
+        }
+        (player as any)._lastBallVx = ballPos.vx;
+        if ((player as any)._reactFreeze && Date.now() < (player as any)._reactFreeze) {
+          // During freeze reduce movement influence
+          player.position.x = player.position.x * 0.999 + targetDepth * 0.001;
+        } else if ((player as any)._reactFreeze && Date.now() >= (player as any)._reactFreeze) {
+          delete (player as any)._reactFreeze;
+        }
+        // Small jitter for individuality: left and right keepers different amplitude/frequency
+        if (!('_jitPhase' in (player as any))) (player as any)._jitPhase = Math.random() * Math.PI * 2;
+        (player as any)._jitPhase += 0.05 + (isLeftKeeper ? 0.015 : 0.03);
+        const amp = isLeftKeeper ? 2.2 : 3.5;
+        player.position.y += Math.sin((player as any)._jitPhase) * amp * dtNorm;
+        // Clamp keeper operating box
+        if (isLeftKeeper) {
+          player.position.x = Math.max(30, Math.min(140, player.position.x));
+        } else {
+          player.position.x = Math.max(fieldWidth - 140, Math.min(fieldWidth - 30, player.position.x));
+        }
         player.position.y = Math.max(40, Math.min(fieldHeight - 40, player.position.y));
         return;
       }
@@ -409,9 +447,32 @@ export class GameEngineService {
   const chaseFactor = (isChasing ? (1 + speedCfg.chaseExtra) : 0.3) * baseMove * speedFactor * staminaFactor;
       const formationFactor = 0.06 * baseMove; // subtle pull to base
 
-      // Random jitter to avoid perfect lines
-  const jitterX = (Math.random() - 0.5) * 0.3 * baseMove;
-  const jitterY = (Math.random() - 0.5) * 0.3 * baseMove;
+      // Reduced jitter + tactical repositioning: assign soft target lanes when not chasing
+      let jitterX = (Math.random() - 0.5) * 0.08 * baseMove;
+      let jitterY = (Math.random() - 0.5) * 0.08 * baseMove;
+
+      // Off-ball movement: nudge towards dynamic lane targets to prevent shaking
+      if (!isChasing) {
+        if (!(player as any)._laneTarget) {
+          (player as any)._laneTarget = { x: base.x, y: base.y };
+        }
+        const tgt = (player as any)._laneTarget;
+        // Recompute a new micro target occasionally
+        if (!(player as any)._laneRecalc || Date.now() > (player as any)._laneRecalc) {
+          // Forward bias based on role
+          const forwardBias = player.role === 'forward' ? 60 : player.role === 'midfielder' ? 40 : 20;
+          const dir = (this.team1 && this.team1.players.includes(player)) ? 1 : -1;
+          tgt.x = base.x + dir * (Math.random() * forwardBias);
+          // Vertical band – maintain spacing by small randomized offset
+          tgt.y = base.y + (Math.random() - 0.5) * 50;
+          (player as any)._laneRecalc = Date.now() + 1200 + Math.random() * 1800; // 1.2s–3s
+        }
+        // Add steering toward lane target
+        const steerX = (tgt.x - player.position.x) * 0.015 * baseMove;
+        const steerY = (tgt.y - player.position.y) * 0.015 * baseMove;
+        jitterX += steerX;
+        jitterY += steerY;
+      }
 
       if (distance > 28) {
         const angle = Math.atan2(dy, dx);
@@ -419,8 +480,8 @@ export class GameEngineService {
         player.position.y += Math.sin(angle) * chaseFactor + (base.y - player.position.y) * formationFactor + jitterY;
       } else {
         // Close to ball: maintain some spacing by nudging toward base
-        player.position.x += (base.x - player.position.x) * 0.07 * baseMove + jitterX;
-        player.position.y += (base.y - player.position.y) * 0.07 * baseMove + jitterY;
+        player.position.x += (base.x - player.position.x) * 0.05 * baseMove + jitterX;
+        player.position.y += (base.y - player.position.y) * 0.05 * baseMove + jitterY;
       }
 
       // Keep players on field
@@ -484,7 +545,9 @@ export class GameEngineService {
       const isLeftTeam = this.team1.players.includes(ownerPlayer);
       const dir = isLeftTeam ? 1 : -1;
       // Dribble advance (scaled by playerBase)
-      const advance = speedCfg.playerBase * 0.9;
+  // Increase dribble advance to promote territorial gain
+  const staminaBoost = ownerPlayer.abilities ? (0.6 + 0.4 * (ownerPlayer.abilities.stamina / ownerPlayer.abilities.maxStamina)) : 1;
+  const advance = speedCfg.playerBase * 1.4 * staminaBoost; // was 0.9
       ownerPlayer.position.x += advance * dir;
       // mild lateral drift toward center line to avoid hugging touchline
       const centerY = environment.gameSettings.fieldHeight / 2;
@@ -511,7 +574,7 @@ export class GameEngineService {
       });
     }
 
-    // Passing / shooting logic: if owner exists and cooldown passed, first consider shot, else pass forward
+    // Passing / shooting logic: if owner exists and cooldown passed, first consider shot, else pass (multi-direction)
     const now = Date.now();
     if (owner && now - this.lastPassTime > this.passCooldown) {
       const ownerPlayer = owner as Player; // stabilize narrowing for arrow callbacks
@@ -526,7 +589,8 @@ export class GameEngineService {
       const staminaFactor = ownerPlayer.abilities ? (0.5 + 0.5 * (ownerPlayer.abilities.stamina / ownerPlayer.abilities.maxStamina)) : 1;
       const powerFactor = ownerPlayer.abilities ? (0.6 + ownerPlayer.abilities.shotPower / 100 * 0.8) : 1; // 0.6 - 1.4
       const accuracyFactor = ownerPlayer.abilities ? (0.5 + ownerPlayer.abilities.accuracy / 100 * 0.5) : 1; // 0.5 - 1.0 spread reduction
-      const shootProbability = distanceToGoalLine < 90 ? 0.75 + (powerFactor - 1) * 0.2 : distanceToGoalLine < 140 ? 0.45 + (powerFactor - 1) * 0.15 : 0;
+  // Boost shooting frequency: allow attempts slightly earlier
+  const shootProbability = distanceToGoalLine < 110 ? 0.78 + (powerFactor - 1) * 0.22 : distanceToGoalLine < 170 ? 0.40 + (powerFactor - 1) * 0.15 : 0;
       if (shootProbability > 0 && Math.random() < shootProbability && withinVerticalGoalSpan) {
         // Attempt shot
         const aimSpread = goalMouthHalf * (1.2 - 0.7 * accuracyFactor); // better accuracy narrows spread
@@ -544,43 +608,125 @@ export class GameEngineService {
         this.generateGameEvent('shot', (sameTeam === this.team1.players ? this.team1.name : this.team2!.name), ownerPlayer.name);
         return;
       }
-      // Prefer players further forward in owner's attack direction
-      let forwardCandidates: Player[] = sameTeam.filter(p => p.id !== ownerPlayer.id && (ownerSideLeft ? p.position.x > ownerPlayer.position.x : p.position.x < ownerPlayer.position.x));
-      // Weight candidates by how advanced they are (favor through play)
-      if (forwardCandidates.length > 0) {
-        forwardCandidates = forwardCandidates.sort((a,b) => ownerSideLeft ? b.position.x - a.position.x : a.position.x - b.position.x).slice(0,4);
-      }
-      const fallback = sameTeam.filter(p => p.id !== ownerPlayer.id);
-      const candidates: Player[] = forwardCandidates.length > 0 ? forwardCandidates : fallback;
-      if (candidates.length > 0) {
-        // bias toward first (most advanced) 60% of the time
-        let target: Player;
-        if (Math.random() < 0.6) {
-          target = candidates[0];
-        } else {
-          target = candidates[Math.floor(Math.random() * candidates.length)];
+      // Multi-directional passing logic: allow forward, lateral, and backward passes with adaptive, zone-based weights
+      const teammates = sameTeam.filter(p => p.id !== ownerPlayer.id);
+      if (teammates.length > 0) {
+        const dirSign = ownerSideLeft ? 1 : -1; // attacking direction (positive when left team attacks right)
+        const forward: Player[] = [];
+        const lateral: Player[] = [];
+        const backward: Player[] = [];
+        teammates.forEach(p => {
+          // Lower forward threshold so modest advancement counts
+          const dxSide = (p.position.x - ownerPlayer.position.x) * dirSign; // positive => forward relative to attack
+          const dyAbs = Math.abs(p.position.y - ownerPlayer.position.y);
+          if (dxSide > 6) { // was >12
+            forward.push(p);
+          } else if (dxSide < -12) {
+            backward.push(p);
+          } else {
+            lateral.push(p);
+          }
+        });
+        // Sort forward by how advanced, backward by how safe (closer), lateral by proximity
+        forward.sort((a,b) => (ownerSideLeft ? b.position.x - a.position.x : a.position.x - b.position.x));
+        backward.sort((a,b) => Math.hypot(a.position.x-ownerPlayer.position.x,a.position.y-ownerPlayer.position.y) - Math.hypot(b.position.x-ownerPlayer.position.x,b.position.y-ownerPlayer.position.y));
+        lateral.sort((a,b) => Math.hypot(a.position.x-ownerPlayer.position.x,a.position.y-ownerPlayer.position.y) - Math.hypot(b.position.x-ownerPlayer.position.x,b.position.y-ownerPlayer.position.y));
+        // Field zone based weighting (defensive third encourages forward build-up)
+        const fieldW = environment.gameSettings.fieldWidth;
+        const xRel = ownerSideLeft ? ownerPlayer.position.x : (fieldW - ownerPlayer.position.x); // distance from own goal line
+        const defensiveThird = xRel < fieldW * 0.33;
+        const attackingThird = xRel > fieldW * 0.66;
+        let wForward = defensiveThird ? 0.70 : attackingThird ? 0.50 : 0.55;
+        let wLateral = defensiveThird ? 0.25 : attackingThird ? 0.35 : 0.25;
+        let wBackward = defensiveThird ? 0.05 : attackingThird ? 0.15 : 0.20;
+        // If no forward options, redistribute weight
+        if (forward.length === 0) {
+          wLateral = 0.55; wBackward = 0.45; wForward = 0;
         }
-        const dx = target.position.x - ball.x;
-        const dy = target.position.y - ball.y;
-        const dist = Math.hypot(dx, dy) || 1;
-        const passPowerFactor = ownerPlayer.abilities ? (0.5 + ownerPlayer.abilities.passPower / 100 * 0.9) : 1; // 0.5 - 1.4
-        const passAccuracyFactor = ownerPlayer.abilities ? (0.5 + ownerPlayer.abilities.accuracy / 100 * 0.5) : 1;
-        const passSpeed = environment.gameSettings.speed.passSpeed * passPowerFactor;
-        // Slight target leading using target speedFactor
-        const lead = target.abilities ? (target.abilities.speedFactor * 4) : 2;
-        const targetX = target.position.x + (ownerSideLeft ? lead : -lead);
-        const targetY = target.position.y + (Math.random() - 0.5) * (18 / passAccuracyFactor); // less vertical randomness with higher accuracy
-        const ndx = targetX - ball.x;
-        const ndy = targetY - ball.y;
-        const ndist = Math.hypot(ndx, ndy) || 1;
-        const vx = (ndx / ndist) * passSpeed;
-        const vy = (ndy / ndist) * passSpeed;
-        const updated = { ...currentState.ball, vx, vy };
-        // Release ownership on pass so receiving player must acquire when close
-        this.gameState$.next({ ...currentState, ball: updated, currentBallOwner: null });
-        this.lastPassTime = now;
-        this.generateGameEvent('pass', (sameTeam === this.team1.players ? this.team1.name : this.team2!.name), `${ownerPlayer.name}→${target.name}`);
-        return;
+        // If under pressure (near many opponents), shift to lateral safety more than backward
+        const opponents = this.team1.players.includes(ownerPlayer) ? this.team2.players : this.team1.players;
+        const nearbyOpps = opponents.filter(o => Math.hypot(o.position.x-ownerPlayer.position.x, o.position.y-ownerPlayer.position.y) < 110).length;
+        if (nearbyOpps >= 3) {
+          wLateral += 0.12; wForward -= 0.07; wBackward += 0.05;
+        } else if (nearbyOpps === 2) {
+          wLateral += 0.05; wForward -= 0.05;
+        }
+        // Early game build-up: discourage backward passes in first few simulated minutes
+        const elapsedSim = this.gameDuration - this.gameState$.value.timeRemaining; // simulation seconds
+        if (elapsedSim < 5) { // first 5 simulation seconds map to 5 real minutes in display
+          wBackward *= 0.2; wForward += 0.05; wLateral += 0.05;
+        }
+        // If we've had multiple non-advancing passes, strongly bias forward/lateral
+        if (this.consecutiveNonAdvancingPasses >= 2) {
+          wForward += 0.30; wBackward *= 0.08; wLateral += 0.12;
+        }
+        // Periodic forced progression: every 3rd non-advancing cycle attempt a through forward pass if available
+        const forceThrough = (this.consecutiveNonAdvancingPasses >= 3) && forward.length > 0;
+        // Normalize weights (avoid negatives)
+        wForward = Math.max(0, wForward); wLateral = Math.max(0, wLateral); wBackward = Math.max(0, wBackward);
+        const totalW = wForward + wLateral + wBackward || 1;
+        wForward /= totalW; wLateral /= totalW; wBackward /= totalW;
+        // Select direction
+        let chosenSet: Player[] | null = null;
+        const rDir = Math.random();
+        if (rDir < wForward && forward.length) chosenSet = forward.slice(0,4);
+        else if (rDir < wForward + wLateral && lateral.length) chosenSet = lateral.slice(0,4);
+        else if (backward.length) chosenSet = backward.slice(0,4);
+        else chosenSet = (forward.length? forward : lateral.length? lateral : backward).slice(0,4);
+        if (chosenSet && chosenSet.length) {
+          // Candidate weighting by distance (closer lateral/backward safer, forward most advanced prioritized)
+          let target: Player;
+          if (chosenSet === forward) {
+            // Forced progression selects furthest for through ball
+            if (forceThrough) {
+              target = chosenSet[0];
+            } else if (Math.random() < 0.55) {
+              target = chosenSet[0];
+            } else {
+              target = chosenSet[Math.floor(Math.random()*chosenSet.length)];
+            }
+          } else if (chosenSet === backward) {
+            target = chosenSet[0]; // safest (closest)
+          } else { // lateral
+            target = chosenSet[0];
+          }
+          const passPowerFactor = ownerPlayer.abilities ? (0.5 + ownerPlayer.abilities.passPower / 100 * 0.9) : 1; // 0.5 - 1.4
+          const passAccuracyFactor = ownerPlayer.abilities ? (0.5 + ownerPlayer.abilities.accuracy / 100 * 0.5) : 1;
+          let passSpeed = environment.gameSettings.speed.passSpeed * passPowerFactor;
+          if (forceThrough) passSpeed *= 1.15; // slight boost for through pass
+          // Leading: stronger when forward, minimal when backward
+          const leadBase = target.abilities ? (target.abilities.speedFactor * 4) : 2;
+          const leadFactor = chosenSet === forward ? 1.0 : chosenSet === lateral ? 0.4 : 0.1;
+          const lead = leadBase * leadFactor * (ownerSideLeft ? 1 : -1);
+          const lateralJitter = (Math.random() - 0.5) * (18 / passAccuracyFactor);
+          const targetX = target.position.x + lead;
+          const targetY = target.position.y + lateralJitter;
+          const ndx = targetX - ball.x;
+          const ndy = targetY - ball.y;
+          const ndist = Math.hypot(ndx, ndy) || 1;
+          const vx = (ndx / ndist) * passSpeed;
+          const vy = (ndy / ndist) * passSpeed;
+          const updated = { ...currentState.ball, vx, vy };
+          this.gameState$.next({ ...currentState, ball: updated, currentBallOwner: null });
+          this.lastPassTime = now;
+          // Add directional symbol (→, ↔, ↩) for flavor
+          const dirSymbol = chosenSet === forward ? (forceThrough ? '⇢' : '→') : chosenSet === lateral ? '↔' : '↩';
+          this.generateGameEvent('pass', (sameTeam === this.team1.players ? this.team1.name : this.team2!.name), `${ownerPlayer.name}${dirSymbol}${target.name}`);
+          // Update progression tracking
+          const forwardDelta = dirSign * (target.position.x - ownerPlayer.position.x);
+          if (forwardDelta > 14) {
+            this.consecutiveNonAdvancingPasses = 0;
+          } else {
+            this.consecutiveNonAdvancingPasses++;
+          }
+          // Adaptive pass cooldown shortening if stagnating
+          if (this.consecutiveNonAdvancingPasses >= 2) {
+            this.passCooldown = Math.max(1200, this.basePassCooldown - 400);
+          } else {
+            this.passCooldown = this.basePassCooldown;
+          }
+          return;
+        }
       }
     }
 
@@ -598,7 +744,9 @@ export class GameEngineService {
     const everyone = [...this.team1.players, ...this.team2.players];
 
     // Collision-based foul chance with cooldown and velocity component to reduce spam
-    if (now - this.lastFoulTime > this.foulCooldownMs) {
+    // Suppress fouls in opening moments to avoid clustered whistle spam
+    const elapsedSim = this.gameDuration - this.gameState$.value.timeRemaining;
+    if (elapsedSim > 3 && (now - this.lastFoulTime > this.foulCooldownMs)) {
       const foulCandidates: { offender: Player; team: Team; impact: number }[] = [];
       for (let i = 0; i < everyone.length; i++) {
         for (let j = i + 1; j < everyone.length; j++) {
