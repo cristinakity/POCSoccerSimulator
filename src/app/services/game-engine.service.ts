@@ -49,6 +49,9 @@ export class GameEngineService {
     this.team2 = team2;
     this.gameDuration = duration;
 
+    // Ensure visibly distinct colors between the two selected teams
+    this.ensureDistinctTeamColors();
+
     // Initialize player positions
     this.initializePlayerPositions();
 
@@ -72,6 +75,32 @@ export class GameEngineService {
 
     // Add game start event
     this.generateGameEvent('substitution', 'Game Start', 'The match begins!');
+  }
+
+  // Adjust team2 color if too similar to team1 for better on-field contrast
+  private ensureDistinctTeamColors(): void {
+    if (!this.team1 || !this.team2) return;
+    const hexToRgb = (hex: string) => {
+      const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+      if (!m) return { r: 0, g: 0, b: 0 };
+      return { r: parseInt(m[1], 16), g: parseInt(m[2], 16), b: parseInt(m[3], 16) };
+    };
+    const distance = (c1: string, c2: string) => {
+      const a = hexToRgb(c1); const b = hexToRgb(c2);
+      return Math.sqrt((a.r - b.r) ** 2 + (a.g - b.g) ** 2 + (a.b - b.b) ** 2);
+    };
+    if (distance(this.team1.color, this.team2.color) < 120) {
+      // Invert team2 color for maximum separation
+      const { r, g, b } = hexToRgb(this.team2.color);
+      const inv = `#${(255 - r).toString(16).padStart(2, '0')}${(255 - g).toString(16).padStart(2, '0')}${(255 - b).toString(16).padStart(2, '0')}`;
+      // If still close (rare), shift hue by simple channel rotation
+      if (distance(this.team1.color, inv) < 120) {
+        const rotated = `#${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}${r.toString(16).padStart(2, '0')}`;
+        this.team2.color = rotated.toUpperCase();
+      } else {
+        this.team2.color = inv.toUpperCase();
+      }
+    }
   }
 
   stopGame(): void {
