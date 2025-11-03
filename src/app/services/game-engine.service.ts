@@ -60,11 +60,13 @@ export class GameEngineService {
   // -------------------------------------------------
   startGame(team1: Team, team2: Team, duration: number = this.gameDuration): void {
     // Initialize teams and game state
-    this.team1 = this.cloneTeam(team1);
-    this.team2 = this.cloneTeam(team2);
+    // IMPORTANT: Use the original team object references so the component inputs reflect updated player positions.
+    // Previously we deep-cloned teams; that prevented the canvas from seeing updated positions (stayed at 0,0).
+    this.team1 = team1;
+    this.team2 = team2;
     this.gameDuration = duration;
     this.ensureDistinctTeamColors();
-    this.initializePlayerPositions();
+  this.initializePlayerPositions();
     this.seedRng(team1, team2, duration);
 
     const fieldWidth = environment.gameSettings.fieldWidth;
@@ -175,13 +177,17 @@ export class GameEngineService {
         vy = 0;
       }
     } else {
-      x += vx * delta;
-      y += vy * delta;
+      // Treat vx, vy as pixels per second; delta is ms → convert to seconds.
+      const dtSec = delta / 1000;
+      x += vx * dtSec;
+      y += vy * dtSec;
 
+      // Apply friction per frame (simple exponential decay).
       const friction = environment.gameSettings.speed.frictionFree;
       vx *= friction;
       vy *= friction;
 
+      // Clamp inside pitch bounds.
       x = Math.max(0, Math.min(this.W, x));
       y = Math.max(0, Math.min(this.H, y));
     }
@@ -288,33 +294,57 @@ export class GameEngineService {
   }
 
   private initializePlayerPositions(): void {
-    // Initialize player positions for both teams
-    if (this.team1) {
-      this.setTeamFormation(this.team1, true);
-    }
-    if (this.team2) {
-      this.setTeamFormation(this.team2, false);
-    }
+    if (!this.team1 || !this.team2) return;
+    // Role-based formation assignment (supports 11 players: 1 GK, 4 DEF, 3 MID, 3 FWD)
+    const apply = (team: Team, left: boolean) => {
+      const W = environment.gameSettings.fieldWidth;
+      const H = environment.gameSettings.fieldHeight;
+      const sideSign = left ? 1 : -1;
+      const halfCenterX = left ? W * 0.25 : W * 0.75; // base defender line
+      const midLineX = left ? W * 0.48 : W * 0.52;    // midfield line lean
+      const fwdLineX = left ? W * 0.72 : W * 0.28;    // forward line near attacking third
+
+      const gk = team.players.filter(p => p.role === 'goalkeeper');
+      const defs = team.players.filter(p => p.role === 'defender');
+      const mids = team.players.filter(p => p.role === 'midfielder');
+      const fwds = team.players.filter(p => p.role === 'forward');
+
+      const spreadAssign = (arr: Player[], cx: number, yTop: number, yBottom: number) => {
+        if (!arr.length) return;
+        arr.forEach((p, i) => {
+          const rel = arr.length === 1 ? 0 : (i / (arr.length - 1) - 0.5); // -0.5..0.5
+          const baseY = ((yTop + yBottom) / 2) + rel * (yBottom - yTop) * 0.9;
+          p.position.x = cx + (this.rand() - 0.5) * 18;
+          p.position.y = Math.max(30, Math.min(H - 30, baseY + (this.rand() - 0.5) * 14));
+        });
+      };
+
+      // Goalkeeper positioning
+      gk.forEach(p => {
+        p.position.x = left ? W * 0.06 : W * 0.94;
+        p.position.y = H / 2 + (this.rand() - 0.5) * 40;
+      });
+
+      // Lines vertical bands
+      spreadAssign(defs, halfCenterX, H * 0.25, H * 0.75);
+      spreadAssign(mids, midLineX, H * 0.2, H * 0.8);
+      spreadAssign(fwds, fwdLineX, H * 0.3, H * 0.7);
+
+      // Ensure no one crosses midfield before kickoff (law compliance)
+      const mid = W / 2;
+      team.players.forEach(p => {
+        if (left && p.position.x > mid - 12) p.position.x = mid - 12;
+        if (!left && p.position.x < mid + 12) p.position.x = mid + 12;
+      });
+    };
+
+    apply(this.team1, true);
+    apply(this.team2, false);
   }
 
-  private setTeamFormation(team: Team, isLeftSide: boolean): void {
-    const fieldWidth = environment.gameSettings.fieldWidth;
-    const fieldHeight = environment.gameSettings.fieldHeight;
-    const formation = [
-      { x: isLeftSide ? fieldWidth * 0.1 : fieldWidth * 0.9, y: fieldHeight * 0.5 }, // Goalkeeper
-      { x: isLeftSide ? fieldWidth * 0.25 : fieldWidth * 0.75, y: fieldHeight * 0.3 }, // Defender 1
-      { x: isLeftSide ? fieldWidth * 0.25 : fieldWidth * 0.75, y: fieldHeight * 0.7 }, // Defender 2
-      { x: isLeftSide ? fieldWidth * 0.4 : fieldWidth * 0.6, y: fieldHeight * 0.5 }, // Midfielder
-      { x: isLeftSide ? fieldWidth * 0.6 : fieldWidth * 0.4, y: fieldHeight * 0.4 }, // Forward 1
-      { x: isLeftSide ? fieldWidth * 0.6 : fieldWidth * 0.4, y: fieldHeight * 0.6 }, // Forward 2
-    ];
-
-    team.players.forEach((player, index) => {
-      if (formation[index]) {
-        player.position.x = formation[index].x;
-        player.position.y = formation[index].y;
-      }
-    });
+  /** Expose current mutable team references (used by UI if needed) */
+  getTeams(): { team1: Team | null; team2: Team | null } {
+    return { team1: this.team1, team2: this.team2 };
   }
 
   private findKickoffPlayer(team: Team, fieldWidth: number, fieldHeight: number): Player | null {
