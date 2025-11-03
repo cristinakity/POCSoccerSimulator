@@ -223,13 +223,33 @@ export class GameEngineService {
           if (this.isGoal(x, y)) {
             this.scoreGoal(p.passer);
             this.pendingPass = null;
+            // scoreGoal handles ball reset
             return;
           } else {
             this.emitEvent('shot', this.teamOfPlayer(p.passer).name, p.passer.name);
+            // Missed shot: ball becomes loose at end position with reduced velocity
+            vx *= 0.3;
+            vy *= 0.3;
+            this.pendingPass = null;
+            this.gameState$.next({ ...gs, ball: { x, y, vx, vy }, currentBallOwner: null });
+            return;
           }
         }
-        this.setBallOwner(p.target);
+        // Pass completed: ball arrives at destination, becomes loose
+        // Target player will pick it up automatically if close enough (handled in updatePlayerPositions)
         this.pendingPass = null;
+        vx *= 0.2; // slow down for easier pickup
+        vy *= 0.2;
+        // Check if target is close enough to receive immediately
+        const distToTarget = Math.hypot(p.target.position.x - x, p.target.position.y - y);
+        if (distToTarget < 15) {
+          // Target is close, give them the ball
+          this.setBallOwner(p.target);
+          x = p.target.position.x;
+          y = p.target.position.y;
+          vx = 0;
+          vy = 0;
+        }
       }
       this.gameState$.next({ ...gs, ball: { x, y, vx, vy } });
       return;
