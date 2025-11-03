@@ -26,7 +26,7 @@ export interface PlayerAbilities {
 
 export interface GameEvent {
   time: number;
-  type: 'goal' | 'foul' | 'substitution' | 'corner' | 'offside' | 'yellow_card' | 'red_card' | 'pass' | 'shot' | 'coin_toss' | 'kickoff' | 'throw_in' | 'tackle' | 'interception' | 'clearance' | 'goal_kick' | 'save';
+  type: 'goal' | 'foul' | 'substitution' | 'corner' | 'offside' | 'yellow_card' | 'red_card' | 'pass' | 'shot' | 'coin_toss' | 'kickoff' | 'throw_in' | 'tackle' | 'interception' | 'clearance' | 'goal_kick' | 'save' | 'penalty';
   team: string;
   player: string;
   description: string;
@@ -255,6 +255,17 @@ export class TeamService {
         `${playerName} wins the ball with a tackle!`,
         `Strong challenge from ${playerName}. Possession turned.`,
         `${playerName} slides in and takes it cleanly!`
+      ]
+      ,
+      interception: [
+        `${playerName} intercepts the pass!`,
+        `Smart read by ${playerName} – interception!`,
+        `${playerName} cuts out the passing lane.`
+      ],
+      penalty: [
+        `Penalty awarded! ${playerName} to take it for ${teamName}.`,
+        `Spot kick given – ${playerName} steps up!`,
+        `Huge chance: penalty for ${teamName}! ${playerName} prepares.`
       ]
     };
 

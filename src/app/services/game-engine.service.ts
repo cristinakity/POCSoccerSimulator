@@ -44,6 +44,7 @@ export class GameEngineService {
   private recentOwners: string[] = [];
   private stagnationStartTs = 0;
   private stagnationRefX = 0;
+  private restartGraceUntil = 0; // suppress certain rule checks (offside) briefly after restarts
 
   getGameState(): Observable<GameState> { return this.gameState$.asObservable(); }
   getGameEvents(): Observable<GameEvent> { return this.gameEvents$.asObservable(); }
@@ -223,11 +224,48 @@ export class GameEngineService {
       const gs = this.gameState$.value;
       if (!gs.isRunning) return;
       if (gs.timeRemaining <= 0) {
+        // Match finished
+        this.gameState$.next({ ...gs, phase: 'finished', isRunning: false, timeRemaining: 0 });
         this.stopGame();
       } else {
-        this.gameState$.next({ ...gs, timeRemaining: gs.timeRemaining - 1 });
+        const newTime = gs.timeRemaining - 1;
+        // Halftime trigger (simple: midpoint of configured duration if > 60 real minutes target (i.e., 90 sim seconds))
+        const halfMark = Math.floor(this.gameDuration / 2);
+        if (gs.phase === 'inplay' && newTime === halfMark) {
+          this.enterHalftime();
+        } else {
+          this.gameState$.next({ ...gs, timeRemaining: newTime });
+        }
       }
     }, 1000);
+  }
+
+  private enterHalftime(): void {
+    const gs = this.gameState$.value;
+    this.gameState$.next({ ...gs, phase: 'pregame', isRunning: false }); // reuse 'pregame' as paused state for brevity
+    // Side switch: mirror all player x positions
+    const fieldW = environment.gameSettings.fieldWidth;
+    [...(this.team1?.players||[]), ...(this.team2?.players||[])].forEach(p => {
+      p.position.x = fieldW - p.position.x;
+      if ((p as any).basePosition) {
+        (p as any).basePosition.x = fieldW - (p as any).basePosition.x;
+      }
+    });
+    // Delay then restart second half
+    setTimeout(() => {
+      const cur = this.gameState$.value;
+      if (cur.phase === 'pregame') {
+        // Center ball, clear owner
+        this.gameState$.next({
+          ...cur,
+          ball: { x: fieldW/2, y: environment.gameSettings.fieldHeight/2, vx: 0, vy: 0 },
+          currentBallOwner: null,
+          phase: 'inplay',
+          isRunning: true
+        });
+        this.restartGraceUntil = Date.now() + 2000;
+      }
+    }, 2500);
   }
 
   private updateBallPosition(delta: number): void {
@@ -279,6 +317,7 @@ export class GameEngineService {
           const playerName = scorer ? scorer.name : 'Unknown';
           this.generateGameEvent('goal', teamName, playerName);
           this.resetForKickoff();
+          this.restartGraceUntil = Date.now() + 2000;
           return;
         } else {
           // Corner or goal kick: determine last touch side
@@ -291,6 +330,7 @@ export class GameEngineService {
           } else {
             this.performCorner(attackingTeam === 'team1' ? this.team1! : this.team2!, crossedLeft ? 'left' : 'right', y < goalCenterY ? 'top' : 'bottom');
           }
+          this.restartGraceUntil = Date.now() + 2000;
           return;
         }
       }
@@ -580,6 +620,8 @@ export class GameEngineService {
             subtype: 'shot_attempt',
             result: 'attempt'
           };
+          this.lastShooter = owner; // track for potential goal credit
+          this.lastTouchTeam = this.team1!.players.includes(owner) ? 'team1' : 'team2';
           this.lastPassTime = now; this.generateGameEvent('shot', (this.team1.players.includes(owner) ? this.team1.name : this.team2!.name), owner.name); this.possessionStartTime = now; return;
         }
         const teammates = (this.team1.players.includes(owner) ? this.team1.players : this.team2.players).filter(p => p.id !== owner!.id);
@@ -610,6 +652,53 @@ export class GameEngineService {
             const targetY = target.position.y + (Math.random() - 0.5) * (18 / passAccFactor);
             const ndx = targetX - ball.x; const ndy = targetY - ball.y; const nd = Math.hypot(ndx, ndy) || 1;
             const vx = (ndx / nd) * passSpeed; const vy = (ndy / nd) * passSpeed;
+            // Offside check at pass moment (skip if within grace window)
+            const ownerIsTeam1 = this.team1!.players.includes(owner!);
+            if (Date.now() > this.restartGraceUntil) {
+              const defenders = ownerIsTeam1 ? this.team2!.players.filter(p=>p.role!=='goalkeeper') : this.team1!.players.filter(p=>p.role!=='goalkeeper');
+              const secondLastX = this.getSecondLastDefenderX(defenders, ownerIsTeam1 ? 1 : -1);
+              const inOppHalf = ownerIsTeam1 ? target.position.x > environment.gameSettings.fieldWidth/2 : target.position.x < environment.gameSettings.fieldWidth/2;
+              const aheadBall = ownerIsTeam1 ? target.position.x > owner!.position.x : target.position.x < owner!.position.x;
+              const aheadDef = ownerIsTeam1 ? target.position.x > secondLastX : target.position.x < secondLastX;
+              if (inOppHalf && aheadBall && aheadDef) {
+                // Offside - emit event & restart, no pass executed
+                (this as any)._eventExtra = {
+                  startX: owner!.position.x,
+                  startY: owner!.position.y,
+                  endX: target.position.x,
+                  endY: target.position.y,
+                  role: owner!.role,
+                  subtype: 'offside',
+                  result: 'whistle'
+                };
+                const teamName = ownerIsTeam1 ? this.team1!.name : this.team2!.name;
+                this.generateGameEvent('offside', teamName, target.name);
+                this.handleOffsideRestart(target, ownerIsTeam1 ? this.team1! : this.team2!);
+                return;
+              }
+            }
+            // Interception pre-check: any opponent can reach corridor sooner than arrival time
+            const opponentsForIntercept = ownerIsTeam1 ? this.team2!.players : this.team1!.players;
+            const arrivalTimeBall = nd / passSpeed;
+            const interceptor = this.findInterceptor(ball.x, ball.y, targetX, targetY, opponentsForIntercept, arrivalTimeBall, speedCfg.playerBase);
+            if (interceptor) {
+              // Interception event
+              (this as any)._eventExtra = {
+                startX: owner!.position.x,
+                startY: owner!.position.y,
+                endX: interceptor.position.x,
+                endY: interceptor.position.y,
+                role: interceptor.role,
+                subtype: 'interception',
+                result: 'intercepted'
+              };
+              const oppTeamName = this.team1!.players.includes(interceptor) ? this.team1!.name : this.team2!.name;
+              this.generateGameEvent('interception', oppTeamName, interceptor.name);
+              this.lastTouchTeam = this.team1!.players.includes(interceptor) ? 'team1' : 'team2';
+              this.gameState$.next({ ...state, ball: { x: interceptor.position.x, y: interceptor.position.y, vx: 0, vy: 0 }, currentBallOwner: interceptor.id });
+              this.possessionStartTime = now; this.possessionLockOwner = interceptor.id; this.possessionLockUntil = now + 600;
+              return;
+            }
             this.gameState$.next({ ...state, ball: { ...ball, vx, vy }, currentBallOwner: null });
             this.lastPassTime = now;
             const dirSymbol = (chosen === forward) ? '→' : (chosen === lateral) ? '↔' : '↩';
@@ -625,6 +714,7 @@ export class GameEngineService {
               result: 'complete'
             };
             this.generateGameEvent('pass', (this.team1.players.includes(owner) ? this.team1.name : this.team2!.name), `${owner!.name}${dirSymbol}${target.name}`);
+            this.lastTouchTeam = ownerIsTeam1 ? 'team1' : 'team2';
             const forwardDelta = dirSign * (target.position.x - owner!.position.x);
             if (forwardDelta > 14) this.consecutiveNonAdvancingPasses = 0; else this.consecutiveNonAdvancingPasses++;
             this.possessionStartTime = now; return;
@@ -672,25 +762,7 @@ export class GameEngineService {
       }
     }
 
-    // Reduced frequency offside logic
-    if (Math.random() < 0.0012) {
-      const leftAttackers = this.team1.players.filter(p => p.role !== 'goalkeeper');
-      const rightAttackers = this.team2.players.filter(p => p.role !== 'goalkeeper');
-      if (leftAttackers.length && rightAttackers.length) {
-        const leftMostDefenderRightTeam = Math.min(...rightAttackers.map(p => p.position.x));
-        const rightMostDefenderLeftTeam = Math.max(...leftAttackers.map(p => p.position.x));
-        const potentialOffsideLeft = leftAttackers.filter(p => p.position.x > leftMostDefenderRightTeam + 35);
-        const potentialOffsideRight = rightAttackers.filter(p => p.position.x < rightMostDefenderLeftTeam - 35);
-        const pool = [...potentialOffsideLeft, ...potentialOffsideRight];
-        if (pool.length > 0) {
-          const offender = pool[Math.floor(Math.random() * pool.length)];
-          const offenderTeam = this.team1.players.includes(offender) ? this.team1 : this.team2;
-            this.generateGameEvent('offside', offenderTeam.name, offender.name);
-            // After offside, perform restart so ball re-enters play (simple throw-in style for now)
-            this.handleOffsideRestart(offender, offenderTeam);
-        }
-      }
-    }
+    // Offside now handled contextually at pass moment; random generator removed.
   }
 
   private resetBallPosition(): void {
@@ -788,7 +860,13 @@ export class GameEngineService {
       pass: `➡️ ${playerName} passes the ball.`,
       shot: `🎯 ${playerName} takes a shot!`,
       coin_toss: `🪙 Coin toss: ${teamName} will kick off the match!`,
-      kickoff: `🔔 Kickoff by ${playerName} for ${teamName}.`
+      kickoff: `🔔 Kickoff by ${playerName} for ${teamName}.`,
+      interception: `✂️ Interception! ${playerName} cuts out the pass.`,
+      tackle: `🛡️ ${playerName} wins the ball with a tackle.`,
+      goal_kick: `🧤 Goal kick taken by ${playerName}.`,
+      throw_in: `↔️ Throw-in: ${playerName} restarts play.`,
+      penalty: `⚠️ Penalty awarded – ${playerName} steps up.`,
+      save: `🧱 Brilliant save by ${playerName}!`
     };
 
     return events[eventType as keyof typeof events] || `${playerName} is involved in the action!`;
@@ -876,6 +954,7 @@ export class GameEngineService {
       result: 'restart'
     };
     this.generateGameEvent('throw_in', throwTeam.name, taker.name);
+    this.restartGraceUntil = Date.now() + 2000;
   }
 
   private handleOffsideRestart(offender: Player, offenderTeam: Team): void {
@@ -904,5 +983,71 @@ export class GameEngineService {
     };
     // Use throw_in event label per user request for visible restart (could be free_kick in real rules)
     this.generateGameEvent('throw_in', defendingTeam.name, taker.name);
+    this.restartGraceUntil = Date.now() + 2000;
+  }
+
+  // Utility: find second-last defender X (direction 1 means attacking to right)
+  private getSecondLastDefenderX(defenders: Player[], dir: number): number {
+    if (!defenders.length) return dir === 1 ? 0 : environment.gameSettings.fieldWidth;
+    const xs = defenders.map(d => d.position.x).sort((a,b)=> a-b);
+    // For attack to right, second last is penultimate highest; attack to left, second last is second smallest from right
+    if (dir === 1) {
+      return xs[xs.length - 2] || xs[0];
+    } else {
+      return xs[1] || xs[xs.length - 1];
+    }
+  }
+
+  // Interception heuristic
+  private findInterceptor(x0: number, y0: number, x1: number, y1: number, opponents: Player[], ballArrivalTime: number, baseSpeed: number): Player | null {
+    let best: Player | null = null; let bestLead = Infinity;
+    const segLen = Math.hypot(x1 - x0, y1 - y0) || 1;
+    opponents.forEach(o => {
+      const t = this.paramAlongSegment(o.position.x, o.position.y, x0, y0, x1, y1);
+      const clampT = Math.max(0, Math.min(1, t));
+      const px = x0 + (x1 - x0) * clampT;
+      const py = y0 + (y1 - y0) * clampT;
+      const distToCorridor = Math.hypot(o.position.x - px, o.position.y - py);
+      if (distToCorridor > 40) return; // corridor width threshold
+      const oppSpeed = baseSpeed * (o.abilities ? o.abilities.speedFactor : 1);
+      const travelTime = distToCorridor / (oppSpeed + 0.01);
+      if (travelTime < ballArrivalTime * 0.85 && travelTime < bestLead) {
+        bestLead = travelTime; best = o;
+      }
+    });
+    return best;
+  }
+
+  private paramAlongSegment(px: number, py: number, x0: number, y0: number, x1: number, y1: number): number {
+    const dx = x1 - x0; const dy = y1 - y0; const lenSq = dx*dx + dy*dy; if (!lenSq) return 0;
+    return ((px - x0) * dx + (py - y0) * dy) / lenSq;
+  }
+
+  // Penalty setup (simplified)
+  private setupPenaltyKick(attackingTeam: Team, ballX: number): void {
+    const fieldW = environment.gameSettings.fieldWidth;
+    const fieldH = environment.gameSettings.fieldHeight;
+    const penaltySpotM = environment.gameSettings.penaltySpotDistM; // meters
+    const scaleX = fieldW / environment.gameSettings.pitchLengthM;
+    const spotOffsetPx = penaltySpotM * scaleX;
+    const leftSide = ballX < fieldW/2; // penalty near left goal -> attackers shoot toward left goal
+    const spotX = leftSide ? spotOffsetPx : fieldW - spotOffsetPx;
+    const spotY = fieldH / 2;
+    // Shooter: forward with highest shotPower
+    const shooter = [...attackingTeam.players]
+      .filter(p => p.role === 'forward')
+      .sort((a,b) => (b.abilities?.shotPower||0) - (a.abilities?.shotPower||0))[0] || attackingTeam.players[0];
+    this.gameState$.next({ ...this.gameState$.value, ball: { x: spotX, y: spotY, vx: 0, vy: 0 }, currentBallOwner: shooter.id });
+    (this as any)._eventExtra = {
+      startX: spotX,
+      startY: spotY,
+      endX: spotX,
+      endY: spotY,
+      role: shooter.role,
+      subtype: 'penalty_awarded',
+      result: 'restart'
+    };
+    this.generateGameEvent('penalty', attackingTeam.name, shooter.name);
+    this.restartGraceUntil = Date.now() + 2500;
   }
 }
