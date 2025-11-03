@@ -11,6 +11,7 @@ export interface GameState {
   events: GameEvent[];
   currentBallOwner: string | null;
   phase?: 'pregame' | 'kickoff' | 'inplay' | 'finished';
+  kickoffTeamName?: string | null;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -22,7 +23,8 @@ export class GameEngineService {
     ball: { x: 450, y: 300, vx: 0, vy: 0 },
     events: [],
     currentBallOwner: null,
-    phase: 'pregame'
+    phase: 'pregame',
+    kickoffTeamName: null
   });
   private gameEvents$ = new Subject<GameEvent>();
   private animationFrameId: number | null = null;
@@ -59,12 +61,15 @@ export class GameEngineService {
       ball: { x: fieldW/2, y: fieldH/2, vx: 0, vy: 0 },
       events: [],
       currentBallOwner: null,
-      phase: 'pregame'
+      phase: 'pregame',
+      kickoffTeamName: null
     };
     this.gameState$.next(initialState);
     // Coin toss determines kickoff
     const coinWinner = Math.random() < 0.5 ? this.team1! : this.team2!;
-    this.generateGameEvent('coin_toss', coinWinner.name, 'Referee');
+  // Record kickoff winner in state, then emit coin toss event with explicit kickoff info
+  this.gameState$.next({ ...this.gameState$.value, kickoffTeamName: coinWinner.name });
+  this.generateGameEvent('coin_toss', coinWinner.name, 'Referee');
     // Assign kickoff player (center midfielder preferred)
     const midfielders = coinWinner.players.filter(p => p.role === 'midfielder');
     const kickoffPlayer = midfielders.sort((a,b) => Math.hypot(a.position.x-fieldW/2,a.position.y-fieldH/2) - Math.hypot(b.position.x-fieldW/2,b.position.y-fieldH/2))[0] || coinWinner.players[0];
@@ -196,14 +201,17 @@ export class GameEngineService {
 
   private startGameLoop(): void {
     const loop = () => {
-      if (!this.gameState$.value.isRunning) return;
+      const gs = this.gameState$.value;
       const now = Date.now();
       const delta = now - this.lastTime;
       this.lastTime = now;
-      this.updateBallPosition(delta);
-      this.updatePlayerPositions(delta);
-      this.updatePossessionAndPassing(delta);
-      this.generateRandomEvents();
+      // Always keep loop alive; only advance simulation when in active play
+      if (gs.isRunning && gs.phase === 'inplay') {
+        this.updateBallPosition(delta);
+        this.updatePlayerPositions(delta);
+        this.updatePossessionAndPassing(delta);
+        this.generateRandomEvents();
+      }
       this.animationFrameId = requestAnimationFrame(loop);
     };
     this.animationFrameId = requestAnimationFrame(loop);
@@ -652,7 +660,7 @@ export class GameEngineService {
       substitution: `🔄 ${playerName}`,
       pass: `➡️ ${playerName} passes the ball.`,
       shot: `🎯 ${playerName} takes a shot!`,
-      coin_toss: `🪙 Coin toss won by ${teamName}.`,
+      coin_toss: `🪙 Coin toss: ${teamName} will kick off the match!`,
       kickoff: `🔔 Kickoff by ${playerName} for ${teamName}.`
     };
 
