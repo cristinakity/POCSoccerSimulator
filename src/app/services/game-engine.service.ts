@@ -60,6 +60,17 @@ export class GameEngineService {
   private possessionLockUntil = 0;
   private possessionStartTime = 0;
 
+  // Fouls & cards control
+  private lastFoulTime = 0;
+  private foulCooldownMs = 4000;
+  // Restart grace (suppresses immediate tackles/offside after restarts)
+  private restartGraceUntil = 0;
+  // Track last shooter & last touch for restart attribution
+  private lastShooter: Player | null = null;
+  private lastTouchTeam: 'team1' | 'team2' | null = null;
+  // Recent owners history (throw-in attribution)
+  private recentOwners: string[] = [];
+
 
   // ---------- Public streams ----------
   getGameState(): Observable<GameState> {
@@ -163,6 +174,7 @@ export class GameEngineService {
           this.lastDecisionTime = now;
           this.updatePlayerPositions(delta);
           this.handleGameEvents();
+          this.maybeGenerateFoul(now);
         }
       }
 
@@ -234,9 +246,42 @@ export class GameEngineService {
       if (Math.abs(vx) < 0.02) vx = 0; if (Math.abs(vy) < 0.02) vy = 0;
       x = Math.max(0, Math.min(this.W, x));
       y = Math.max(0, Math.min(this.H, y));
+      // Throw-in detection
+      if (y <= 5 || y >= this.H - 5) { this.handleThrowIn(x, y); return; }
+      // Goal / corner / goal kick logic
+      const goalHalf = (environment.gameSettings.goalWidthM * (this.H / environment.gameSettings.pitchWidthM)) / 2;
+      const inAperture = Math.abs(y - this.H / 2) <= goalHalf;
+      const crossedLeft = x < 5; const crossedRight = x > this.W - 5;
+      if (crossedLeft || crossedRight) {
+        if (inAperture) {
+          const scorer = gs.currentBallOwner ? this.findPlayer(gs.currentBallOwner) : this.lastShooter;
+          if (scorer) { this.scoreGoal(scorer); }
+          else {
+            // Neutral goal event (e.g., ball crosses line without clear scorer)
+            this.emitEvent('goal', 'neutral', '', undefined, { startX: x, startY: y, endX: x, endY: y, result: 'goal' });
+            this.gameState$.next({ ...gs, ball: { x: this.W / 2, y: this.H / 2, vx: 0, vy: 0 }, currentBallOwner: null });
+          }
+          this.restartGraceUntil = Date.now() + 1500;
+          return;
+        } else {
+          const attackingTeamIsTeam1 = crossedRight; // team1 attacks right
+          const lastTouch = this.lastTouchTeam || (attackingTeamIsTeam1 ? 'team1' : 'team2');
+          const isGoalKick = lastTouch === (attackingTeamIsTeam1 ? 'team1' : 'team2');
+          if (isGoalKick) {
+            this.performGoalKick(attackingTeamIsTeam1 ? 'team2' : 'team1', crossedLeft ? 'left' : 'right');
+          } else {
+            this.performCorner(attackingTeamIsTeam1 ? this.team1! : this.team2!, crossedLeft ? 'left' : 'right', y < this.H / 2 ? 'top' : 'bottom');
+          }
+          this.restartGraceUntil = Date.now() + 1500;
+          return;
+        }
+      }
+      // Legacy simple goal fallback
       if (this.isGoal(x, y)) {
-        this.emitEvent('goal', 'neutral', '');
-        this.gameState$.next({ ...gs, ball: { x: this.W / 2, y: this.H / 2, vx: 0, vy: 0 } });
+        // Fallback simple goal detection
+        this.emitEvent('goal', 'neutral', '', undefined, { startX: x, startY: y, endX: x, endY: y, result: 'goal' });
+        this.gameState$.next({ ...gs, ball: { x: this.W / 2, y: this.H / 2, vx: 0, vy: 0 }, currentBallOwner: null });
+        this.restartGraceUntil = Date.now() + 1200;
         return;
       }
     }
@@ -274,21 +319,43 @@ export class GameEngineService {
   // -------------------------------------------------
   // Game Events
   // -------------------------------------------------
-  private emitEvent(type: string, teamName: string, playerName: string, descriptionOverride?: string): void {
+  private emitEvent(type: string, teamName: string, playerName: string, descriptionOverride?: string, extra?: Partial<GameEvent>): void {
     const gs = this.gameState$.value;
     const elapsed = this.gameDuration - gs.timeRemaining;
     const displayTime = this.formatTime(elapsed);
-
+    const zone = (x?: number, y?: number): string | undefined => {
+      if (x == null || y == null) return undefined;
+      const third = this.W / 3;
+      let z = 'middle_third';
+      if (x < third) z = 'defensive_third'; else if (x > 2 * third) z = 'attacking_third';
+      const flank = this.H * 0.20;
+      if (y < flank) z += '_top_flank'; else if (y > this.H - flank) z += '_bottom_flank'; else z += '_central';
+      return z;
+    };
     const event: GameEvent = {
       time: elapsed,
       type: type as any,
       team: teamName,
       player: playerName,
-  description: descriptionOverride || this.describeEvent(type, playerName, teamName),
+      description: descriptionOverride || this.describeEvent(type, playerName, teamName),
       displayTime,
       realMinute: Math.floor(elapsed / 60),
+      startX: extra?.startX,
+      startY: extra?.startY,
+      endX: extra?.endX,
+      endY: extra?.endY,
+      result: extra?.result,
+      role: extra?.role,
+      subtype: extra?.subtype,
+      xg: extra?.xg,
+      pressure: extra?.pressure,
+      facingError: extra?.facingError,
+      zoneStart: zone(extra?.startX, extra?.startY),
+      zoneEnd: zone(extra?.endX, extra?.endY)
     };
-
+    if (['pass','shot'].includes(type)) this.momentumCounter = Math.min(100, this.momentumCounter + (type === 'shot' ? 4 : 1));
+    if (type === 'goal') this.momentumCounter = 0;
+    (event as any).momentumIndex = this.momentumCounter;
     this.gameState$.next({ ...gs, events: [...gs.events, event] });
     this.gameEvents$.next(event);
   }
@@ -356,51 +423,42 @@ export class GameEngineService {
 
   private initializePlayerPositions(): void {
     if (!this.team1 || !this.team2) return;
-    // Role-based formation assignment (supports 11 players: 1 GK, 4 DEF, 3 MID, 3 FWD)
-    const apply = (team: Team, left: boolean) => {
+    const formations = [
+      { name: '4-3-3_standard', defX: 0.25, midX: 0.48, fwdX: 0.72, defSpread: 0.50, midSpread: 0.60, fwdSpread: 0.55 },
+      { name: '4-4-2_shape', defX: 0.24, midX: 0.50, fwdX: 0.70, defSpread: 0.52, midSpread: 0.65, fwdSpread: 0.42 },
+      { name: '3-5-2_compact', defX: 0.22, midX: 0.50, fwdX: 0.72, defSpread: 0.60, midSpread: 0.70, fwdSpread: 0.38 },
+      { name: '5-3-2_block', defX: 0.20, midX: 0.46, fwdX: 0.68, defSpread: 0.56, midSpread: 0.55, fwdSpread: 0.34 }
+    ];
+    const pick = () => formations[Math.floor(this.rand() * formations.length)];
+    const placeTeam = (team: Team, left: boolean) => {
       const W = environment.gameSettings.fieldWidth;
       const H = environment.gameSettings.fieldHeight;
-      const sideSign = left ? 1 : -1;
-      const halfCenterX = left ? W * 0.25 : W * 0.75; // base defender line
-      const midLineX = left ? W * 0.48 : W * 0.52;    // midfield line lean
-      const fwdLineX = left ? W * 0.72 : W * 0.28;    // forward line near attacking third
-
+      const f = pick();
       const gk = team.players.filter(p => p.role === 'goalkeeper');
       const defs = team.players.filter(p => p.role === 'defender');
       const mids = team.players.filter(p => p.role === 'midfielder');
       const fwds = team.players.filter(p => p.role === 'forward');
-
-      const spreadAssign = (arr: Player[], cx: number, yTop: number, yBottom: number) => {
-        if (!arr.length) return;
+      const assignLine = (arr: Player[], depth: number, spread: number) => {
+        const cx = depth * W;
         arr.forEach((p, i) => {
-          const rel = arr.length === 1 ? 0 : (i / (arr.length - 1) - 0.5); // -0.5..0.5
-          const baseY = ((yTop + yBottom) / 2) + rel * (yBottom - yTop) * 0.9;
-          p.position.x = cx + (this.rand() - 0.5) * 18;
-          p.position.y = Math.max(30, Math.min(H - 30, baseY + (this.rand() - 0.5) * 14));
+          const rel = arr.length === 1 ? 0 : (i / (arr.length - 1) - 0.5);
+          const y = H / 2 + rel * spread * H * 0.5 + (this.rand() - 0.5) * 18;
+          p.position.x = (left ? cx : W - cx) + (this.rand() - 0.5) * 16;
+          p.position.y = Math.max(30, Math.min(H - 30, y));
         });
       };
-
-      // Goalkeeper positioning
-      gk.forEach(p => {
-        p.position.x = left ? W * 0.06 : W * 0.94;
-        p.position.y = H / 2 + (this.rand() - 0.5) * 40;
-      });
-
-      // Lines vertical bands
-      spreadAssign(defs, halfCenterX, H * 0.25, H * 0.75);
-      spreadAssign(mids, midLineX, H * 0.2, H * 0.8);
-      spreadAssign(fwds, fwdLineX, H * 0.3, H * 0.7);
-
-      // Ensure no one crosses midfield before kickoff (law compliance)
+      gk.forEach(p => { p.position.x = left ? W * 0.06 : W - W * 0.06; p.position.y = H / 2 + (this.rand() - 0.5) * 30; });
+      assignLine(defs, f.defX, f.defSpread);
+      assignLine(mids, f.midX, f.midSpread);
+      assignLine(fwds, f.fwdX, f.fwdSpread);
       const mid = W / 2;
       team.players.forEach(p => {
         if (left && p.position.x > mid - 12) p.position.x = mid - 12;
         if (!left && p.position.x < mid + 12) p.position.x = mid + 12;
       });
     };
-
-    apply(this.team1, true);
-    apply(this.team2, false);
+    placeTeam(this.team1, true);
+    placeTeam(this.team2, false);
   }
 
   /** Expose current mutable team references (used by UI if needed) */
@@ -469,14 +527,25 @@ export class GameEngineService {
     const dist = Math.hypot(endX - startX, endY - startY);
     const speed = environment.gameSettings.speed.passSpeed;
     const duration = Math.max(200, (dist / speed) * 1000);
+    // Interception pre-check
+    const opponents = this.isTeam1(passer) ? this.team2!.players : this.team1!.players;
+    const arrivalTime = dist / speed;
+    const interceptor = this.findInterceptor(startX, startY, endX, endY, opponents, arrivalTime, environment.gameSettings.speed.playerBase);
+    if (interceptor && Date.now() > this.restartGraceUntil) {
+      this.emitEvent('interception', this.teamOfPlayer(interceptor).name, interceptor.name, undefined, { startX, startY, endX: interceptor.position.x, endY: interceptor.position.y, result: 'intercepted', subtype: 'interception', role: interceptor.role });
+      this.setBallOwner(interceptor);
+      this.lastTouchTeam = this.isTeam1(interceptor) ? 'team1' : 'team2';
+      return;
+    }
     this.pendingPass = {
       passer, target, startX, startY, endX, endY,
       startTime: Date.now(), duration,
       type: this.classifyPassType(passer, target)
     };
     this.gameState$.next({ ...this.gameState$.value, currentBallOwner: null });
-    this.emitEvent('pass', this.teamOfPlayer(passer).name, passer.name);
+    this.emitEvent('pass', this.teamOfPlayer(passer).name, passer.name, undefined, { startX, startY, endX, endY, subtype: this.classifyPassType(passer, target), result: 'attempt', role: passer.role });
     this.checkOffsideOnPass(passer, target);
+    this.lastTouchTeam = this.isTeam1(passer) ? 'team1' : 'team2';
   }
 
   private takeShot(shooter: Player, goalX: number, goalY: number): void {
@@ -488,7 +557,9 @@ export class GameEngineService {
     const xg = this.estimateSimpleXG(dist);
     this.pendingPass = { passer: shooter, target: shooter, startX, startY, endX, endY, startTime: Date.now(), duration, type: 'shot', shot: true, xg };
     this.gameState$.next({ ...this.gameState$.value, currentBallOwner: null });
-    this.emitEvent('shot', this.teamOfPlayer(shooter).name, shooter.name);
+    this.emitEvent('shot', this.teamOfPlayer(shooter).name, shooter.name, undefined, { startX, startY, endX, endY, xg, subtype: 'shot_attempt', result: 'attempt', role: shooter.role });
+    this.lastShooter = shooter;
+    this.lastTouchTeam = this.isTeam1(shooter) ? 'team1' : 'team2';
   }
 
   private classifyPassType(from: Player, to: Player): string {
@@ -511,9 +582,10 @@ export class GameEngineService {
     const gs = this.gameState$.value;
     const score = { ...gs.score };
     if (this.isTeam1(scorer)) score.team1++; else score.team2++;
-    this.emitEvent('goal', this.teamOfPlayer(scorer).name, scorer.name);
+    this.emitEvent('goal', this.teamOfPlayer(scorer).name, scorer.name, undefined, { startX: scorer.position.x, startY: scorer.position.y, endX: scorer.position.x, endY: scorer.position.y, result: 'goal', role: scorer.role });
     this.pendingPass = null;
     this.gameState$.next({ ...gs, score, ball: { x: this.W / 2, y: this.H / 2, vx: 0, vy: 0 }, currentBallOwner: null });
+    this.restartGraceUntil = Date.now() + 1200;
   }
 
   private getSecondLastDefenderX(defenders: Player[], dir: number): number {
@@ -531,9 +603,94 @@ export class GameEngineService {
     const aheadBall = isTeam1Passer ? receiver.position.x > passer.position.x : receiver.position.x < passer.position.x;
     const aheadDef = isTeam1Passer ? receiver.position.x > secondLast : receiver.position.x < secondLast;
     if (inOppHalf && aheadBall && aheadDef) {
-      this.emitEvent('offside', this.teamOfPlayer(passer).name, receiver.name);
+      this.emitEvent('offside', this.teamOfPlayer(passer).name, receiver.name, undefined, { startX: passer.position.x, startY: passer.position.y, endX: receiver.position.x, endY: receiver.position.y, result: 'whistle', subtype: 'offside' });
       this.pendingPass = null;
-      this.gameState$.next({ ...this.gameState$.value, ball: { x: passer.position.x, y: passer.position.y, vx: 0, vy: 0 }, currentBallOwner: passer.id });
+      const restartX = passer.position.x - 30 * dir;
+      const restartY = passer.position.y;
+      const defendingTeam = isTeam1Passer ? this.team2! : this.team1!;
+      const taker = defendingTeam.players.find(p => p.role === 'defender') || defendingTeam.players[0];
+      this.gameState$.next({ ...this.gameState$.value, ball: { x: restartX, y: restartY, vx: 0, vy: 0 }, currentBallOwner: taker.id });
+      this.restartGraceUntil = Date.now() + 1500;
+    }
+  }
+
+  // ---------- Advanced helpers (restarts, interception, fouls) ----------
+  private performCorner(team: Team, side: 'left' | 'right', quadrant: 'top' | 'bottom'): void {
+    const W = this.W; const H = this.H;
+    const x = side === 'left' ? 30 : W - 30;
+    const y = quadrant === 'top' ? 30 : H - 30;
+    let taker = team.players[0]; let best = Infinity;
+    team.players.forEach(p => { const d = Math.hypot(p.position.x - x, p.position.y - y); if (d < best) { best = d; taker = p; } });
+    this.gameState$.next({ ...this.gameState$.value, ball: { x, y, vx: 0, vy: 0 }, currentBallOwner: taker.id });
+    this.emitEvent('corner', team.name, taker.name, undefined, { startX: x, startY: y, endX: x, endY: y, result: 'restart', subtype: 'corner_kick', role: taker.role });
+    this.restartGraceUntil = Date.now() + 1200;
+    this.lastTouchTeam = this.isTeam1(taker) ? 'team1' : 'team2';
+  }
+
+  private performGoalKick(defTeam: 'team1' | 'team2', side: 'left' | 'right'): void {
+    const W = this.W; const H = this.H; const team = defTeam === 'team1' ? this.team1! : this.team2!;
+    const x = side === 'left' ? 60 : W - 60; const y = H / 2 + (this.rand() - 0.5) * 80;
+    const keeper = team.players.find(p => p.role === 'goalkeeper') || team.players[0];
+    this.gameState$.next({ ...this.gameState$.value, ball: { x, y, vx: 0, vy: 0 }, currentBallOwner: keeper.id });
+    this.emitEvent('goal_kick', team.name, keeper.name, undefined, { startX: x, startY: y, endX: x, endY: y, result: 'restart', subtype: 'goal_kick', role: keeper.role });
+    this.restartGraceUntil = Date.now() + 1200;
+    this.lastTouchTeam = defTeam;
+  }
+
+  private handleThrowIn(x: number, y: number): void {
+    if (!this.team1 || !this.team2) return;
+    const H = this.H; const W = this.W;
+    const inY = y < H / 2 ? 30 : H - 30;
+    const inX = Math.max(40, Math.min(W - 40, x));
+    const lastId = this.recentOwners[this.recentOwners.length - 1];
+    const all = [...this.team1.players, ...this.team2.players];
+    const lastPlayer = all.find(p => p.id === lastId);
+    const throwTeam = lastPlayer ? (this.team1.players.includes(lastPlayer) ? this.team2! : this.team1!) : this.team1!;
+    let taker = throwTeam.players[0]; let best = Infinity;
+    throwTeam.players.forEach(p => { const d = Math.hypot(p.position.x - inX, p.position.y - inY); if (d < best) { best = d; taker = p; } });
+    this.gameState$.next({ ...this.gameState$.value, ball: { x: inX, y: inY, vx: 0, vy: 0 }, currentBallOwner: taker.id });
+    this.emitEvent('throw_in', throwTeam.name, taker.name, undefined, { startX: inX, startY: inY, endX: inX, endY: inY, result: 'restart', subtype: 'throw_in', role: taker.role });
+    this.restartGraceUntil = Date.now() + 1500;
+  }
+
+  private findInterceptor(x0: number, y0: number, x1: number, y1: number, opponents: Player[], ballArrival: number, baseSpeed: number): Player | null {
+    let best: Player | null = null; let bestLead = Infinity;
+    opponents.forEach(o => {
+      const t = this.paramAlongSegment(o.position.x, o.position.y, x0, y0, x1, y1);
+      const clamp = Math.max(0, Math.min(1, t));
+      const px = x0 + (x1 - x0) * clamp; const py = y0 + (y1 - y0) * clamp;
+      const corridorDist = Math.hypot(o.position.x - px, o.position.y - py);
+      if (corridorDist > 40) return;
+      const oppSpeed = baseSpeed * (o.abilities?.speedFactor ?? 1);
+      const travel = corridorDist / (oppSpeed + 0.01);
+      if (travel < ballArrival * 0.85 && travel < bestLead) { bestLead = travel; best = o; }
+    });
+    return best;
+  }
+  private paramAlongSegment(px: number, py: number, x0: number, y0: number, x1: number, y1: number): number {
+    const dx = x1 - x0; const dy = y1 - y0; const lenSq = dx * dx + dy * dy; if (!lenSq) return 0; return ((px - x0) * dx + (py - y0) * dy) / lenSq;
+  }
+
+  private maybeGenerateFoul(now: number): void {
+    if (!this.team1 || !this.team2) return;
+    if (now - this.lastFoulTime < this.foulCooldownMs) return;
+    const everyone = [...this.team1.players, ...this.team2.players];
+    const collisions: { offender: Player; team: Team }[] = [];
+    for (let i = 0; i < everyone.length; i++) {
+      for (let j = i + 1; j < everyone.length; j++) {
+        const a = everyone[i]; const b = everyone[j];
+        const sameTeam = (this.team1.players.includes(a) && this.team1.players.includes(b)) || (this.team2.players.includes(a) && this.team2.players.includes(b));
+        if (sameTeam) continue;
+        const d = Math.hypot(a.position.x - b.position.x, a.position.y - b.position.y);
+        if (d < 16) collisions.push({ offender: a, team: this.team1.players.includes(a) ? this.team1 : this.team2 });
+      }
+    }
+    if (collisions.length && this.rand() < 0.15) {
+      const pick = collisions[Math.floor(this.rand() * collisions.length)];
+      const cardRoll = this.rand();
+      const type = cardRoll > 0.93 ? 'yellow_card' : 'foul';
+      this.emitEvent(type, pick.team.name, pick.offender.name, undefined, { startX: pick.offender.position.x, startY: pick.offender.position.y, endX: pick.offender.position.x, endY: pick.offender.position.y, result: 'whistle', subtype: type, role: pick.offender.role });
+      this.lastFoulTime = now;
     }
   }
 
