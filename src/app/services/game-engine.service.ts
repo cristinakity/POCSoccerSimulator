@@ -230,6 +230,7 @@ export class GameEngineService {
     const currentState = this.gameState$.value;
     const fieldWidth = environment.gameSettings.fieldWidth;
     const fieldHeight = environment.gameSettings.fieldHeight;
+    const speedCfg = environment.gameSettings.speed;
 
     let ball = { ...currentState.ball };
 
@@ -255,18 +256,17 @@ export class GameEngineService {
       ball.vy += (Math.random() - 0.5) * 0.15 * dt;
     }
 
-    // Limit speed
-    const maxSpeed = 3;
-    const speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
-    if (speed > maxSpeed) {
-      ball.vx = (ball.vx / speed) * maxSpeed;
-      ball.vy = (ball.vy / speed) * maxSpeed;
+    // Limit speed using config
+    const speedMag = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy);
+    if (speedMag > speedCfg.maxBallSpeed) {
+      ball.vx = (ball.vx / speedMag) * speedCfg.maxBallSpeed;
+      ball.vy = (ball.vy / speedMag) * speedCfg.maxBallSpeed;
     }
 
-  // Apply friction
-  const friction = currentState.currentBallOwner ? 0.995 : 0.99;
-  ball.vx *= friction;
-  ball.vy *= friction;
+    // Apply friction (slightly less decay when possessed)
+    const friction = currentState.currentBallOwner ? speedCfg.frictionPossessed : speedCfg.frictionFree;
+    ball.vx *= friction;
+    ball.vy *= friction;
 
     this.gameState$.next({
       ...currentState,
@@ -316,15 +316,17 @@ export class GameEngineService {
       .slice(0, 4)
       .map(x => x.p);
 
-  // Increase scaling to make movement faster (1 sim second = 1 match minute)
-  const dt = (deltaTime / 16.67) * 1.8;
+  const speedCfg = environment.gameSettings.speed;
+  // Normalize dt to ~60fps base
+  const dtNorm = deltaTime / 16.67;
+  const baseMove = speedCfg.playerBase * dtNorm;
     everyone.forEach(player => {
       if (player.role === 'goalkeeper') {
         // Goalkeeper: track ball vertically, modest horizontal shift when ball enters attacking half
         const targetY = Math.max(40, Math.min(fieldHeight - 40, ballPos.y));
         const horizAdjust = Math.abs(ballPos.x - player.position.x) < fieldWidth * 0.55 ? (ballPos.x - player.position.x) * 0.004 : 0;
-        player.position.x += horizAdjust * dt;
-        player.position.y += (targetY - player.position.y) * 0.06 * dt;
+        player.position.x += horizAdjust * baseMove;
+        player.position.y += (targetY - player.position.y) * 0.06 * baseMove;
         // Constrain keeper to a corridor near its goal (detect team by membership)
         const isLeftKeeper = !!this.team1 && this.team1.players.includes(player);
         player.position.x = isLeftKeeper
@@ -338,14 +340,13 @@ export class GameEngineService {
       const dx = ballPos.x - player.position.x;
       const dy = ballPos.y - player.position.y;
       const distance = Math.sqrt(dx * dx + dy * dy);
-
-    // Movement weighting (accelerated)
-    const chaseFactor = (isChasing ? 1.6 : 0.25) * dt;
-    const formationFactor = 0.06 * dt; // subtle pull to base
+      // Movement weighting using config
+      const chaseFactor = (isChasing ? (1 + speedCfg.chaseExtra) : 0.3) * baseMove;
+      const formationFactor = 0.06 * baseMove; // subtle pull to base
 
       // Random jitter to avoid perfect lines
-  const jitterX = (Math.random() - 0.5) * 0.3 * dt;
-  const jitterY = (Math.random() - 0.5) * 0.3 * dt;
+  const jitterX = (Math.random() - 0.5) * 0.3 * baseMove;
+  const jitterY = (Math.random() - 0.5) * 0.3 * baseMove;
 
       if (distance > 28) {
         const angle = Math.atan2(dy, dx);
@@ -353,8 +354,8 @@ export class GameEngineService {
         player.position.y += Math.sin(angle) * chaseFactor + (base.y - player.position.y) * formationFactor + jitterY;
       } else {
         // Close to ball: maintain some spacing by nudging toward base
-        player.position.x += (base.x - player.position.x) * 0.07 * dt + jitterX;
-        player.position.y += (base.y - player.position.y) * 0.07 * dt + jitterY;
+        player.position.x += (base.x - player.position.x) * 0.07 * baseMove + jitterX;
+        player.position.y += (base.y - player.position.y) * 0.07 * baseMove + jitterY;
       }
 
       // Keep players on field
@@ -368,6 +369,7 @@ export class GameEngineService {
     const currentState = this.gameState$.value;
     const ball = currentState.ball;
     const allPlayers = [...this.team1.players, ...this.team2.players];
+    const speedCfg = environment.gameSettings.speed;
 
     // Determine possession: closest player within radius
     const possessionRadius = 18;
@@ -392,6 +394,26 @@ export class GameEngineService {
       const ownerPlayer = owner as Player; // stabilize narrowing for arrow callbacks
       const sameTeam: Player[] = this.team1.players.includes(ownerPlayer) ? this.team1.players : this.team2.players;
       const ownerSideLeft = ownerPlayer.position.x < environment.gameSettings.fieldWidth / 2;
+      const attackingGoalX = ownerSideLeft ? environment.gameSettings.fieldWidth - 20 : 20;
+      // Shooting logic: if owner near opponent penalty area (within 140px horizontally of goal line)
+      const distanceToGoalLine = Math.abs(attackingGoalX - ownerPlayer.position.x);
+      const goalMouthHalf = (environment.gameSettings.goalWidthM * (environment.gameSettings.fieldHeight - 20) / environment.gameSettings.pitchWidthM) / 2;
+      const withinVerticalGoalSpan = Math.abs(ownerPlayer.position.y - environment.gameSettings.fieldHeight/2) < goalMouthHalf + 120; // generous corridor
+      if (distanceToGoalLine < 140 && withinVerticalGoalSpan) {
+        // Attempt shot
+        const targetY = (environment.gameSettings.fieldHeight / 2) + (Math.random() - 0.5) * goalMouthHalf * 1.6; // random within expanded goal area
+        const dxShot = attackingGoalX - ball.x;
+        const dyShot = targetY - ball.y;
+        const dShot = Math.hypot(dxShot, dyShot) || 1;
+        const shotSpeed = speedCfg.shotSpeed;
+        const vxShot = (dxShot / dShot) * shotSpeed;
+        const vyShot = (dyShot / dShot) * shotSpeed;
+        const updatedBall = { ...ball, vx: vxShot, vy: vyShot };
+        this.gameState$.next({ ...currentState, ball: updatedBall, currentBallOwner: ownerPlayer.id });
+        this.lastPassTime = now; // reuse cooldown
+        this.generateGameEvent('shot', (sameTeam === this.team1.players ? this.team1.name : this.team2!.name), ownerPlayer.name);
+        return;
+      }
       // Prefer players further forward in owner's attack direction
       const forwardCandidates: Player[] = sameTeam.filter(p => p.id !== ownerPlayer.id && (ownerSideLeft ? p.position.x > ownerPlayer.position.x : p.position.x < ownerPlayer.position.x));
       const candidates: Player[] = forwardCandidates.length > 0 ? forwardCandidates : sameTeam.filter(p => p.id !== ownerPlayer.id);
@@ -400,13 +422,13 @@ export class GameEngineService {
         const dx = target.position.x - ball.x;
         const dy = target.position.y - ball.y;
         const dist = Math.hypot(dx, dy) || 1;
-        const speed = 9; // faster pass speed to match accelerated simulation
-        const vx = (dx / dist) * speed;
-        const vy = (dy / dist) * speed;
+        const passSpeed = environment.gameSettings.speed.passSpeed;
+        const vx = (dx / dist) * passSpeed;
+        const vy = (dy / dist) * passSpeed;
         const updated = { ...currentState.ball, vx, vy };
         this.gameState$.next({ ...currentState, ball: updated, currentBallOwner: ownerPlayer.id });
         this.lastPassTime = now;
-        this.generateGameEvent('substitution', (sameTeam === this.team1.players ? this.team1.name : this.team2!.name), `${ownerPlayer.name} PASS`);
+        this.generateGameEvent('pass', (sameTeam === this.team1.players ? this.team1.name : this.team2!.name), `${ownerPlayer.name}→${target.name}`);
         return;
       }
     }
@@ -497,7 +519,9 @@ export class GameEngineService {
       corner: `🚩 Corner kick for ${teamName}!`,
       offside: `🚨 ${playerName} is caught offside!`,
       yellow_card: `🟨 Yellow card for ${playerName}!`,
-      substitution: `🔄 ${playerName}`
+      substitution: `🔄 ${playerName}`,
+      pass: `➡️ ${playerName} passes the ball.`,
+      shot: `🎯 ${playerName} takes a shot!`
     };
 
     return events[eventType as keyof typeof events] || `${playerName} is involved in the action!`;

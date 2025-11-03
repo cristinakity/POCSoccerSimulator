@@ -16,7 +16,7 @@ export interface Player {
 
 export interface GameEvent {
   time: number;
-  type: 'goal' | 'foul' | 'substitution' | 'corner' | 'offside' | 'yellow_card' | 'red_card';
+  type: 'goal' | 'foul' | 'substitution' | 'corner' | 'offside' | 'yellow_card' | 'red_card' | 'pass' | 'shot';
   team: string;
   player: string;
   description: string;
@@ -123,6 +123,18 @@ export class TeamService {
         `${playerName} gets booked!`,
         `The referee shows yellow to ${playerName}!`,
         `${playerName} needs to be more careful!`
+      ],
+      pass: [
+        `${playerName} completes a tidy pass.`,
+        `${playerName} finds a teammate in space.`,
+        `Accurate distribution by ${playerName}.`,
+        `${playerName} keeps possession moving.`
+      ],
+      shot: [
+        `${playerName} takes a shot!`,
+        `Powerful attempt by ${playerName}!`,
+        `${playerName} tries one from distance.`,
+        `${playerName} fires toward goal!`
       ]
     };
 

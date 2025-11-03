@@ -12,6 +12,15 @@ export const environment = {
     penaltyAreaDepthM: 16.5,
     penaltySpotDistM: 11,
     centerCircleRadiusM: 9.15,
+    speed: {
+      playerBase: 2.4,       // multiplier for player movement
+      chaseExtra: 1.2,       // additional chase intensity
+      passSpeed: 14,         // base pass speed
+      shotSpeed: 18,         // base shot speed
+      maxBallSpeed: 20,      // clamp for extreme shots
+      frictionPossessed: 0.992,
+      frictionFree: 0.985
+    },
     playerSize: 12,
     ballSize: 8
   }
