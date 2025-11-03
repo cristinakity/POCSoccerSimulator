@@ -13,13 +13,13 @@ export const environment = {
     penaltySpotDistM: 11,
     centerCircleRadiusM: 9.15,
     speed: {
-      playerBase: 2.4,       // multiplier for player movement
-      chaseExtra: 1.2,       // additional chase intensity
-      passSpeed: 14,         // base pass speed
-      shotSpeed: 18,         // base shot speed
-      maxBallSpeed: 20,      // clamp for extreme shots
-      frictionPossessed: 0.992,
-      frictionFree: 0.985
+      playerBase: 3.2,       // faster general movement
+      chaseExtra: 1.6,       // more intense ball pursuit
+      passSpeed: 20,         // zippier passes
+      shotSpeed: 26,         // stronger shots
+      maxBallSpeed: 32,      // allow faster peak speed
+      frictionPossessed: 0.994, // keep dribbles lively
+      frictionFree: 0.988    // ball slows a bit slower than before
     },
     playerSize: 12,
     ballSize: 8

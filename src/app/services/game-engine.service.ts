@@ -31,6 +31,9 @@ export class GameEngineService {
   private lastTime = 0;
   private lastPassTime = 0; // ms timestamp of last pass
   private passCooldown = 2500; // ms between passes
+  // Possession protection mechanics
+  private possessionLockOwner: string | null = null;
+  private possessionLockUntil = 0; // timestamp in ms
 
   private team1: Team | null = null;
   private team2: Team | null = null;
@@ -231,6 +234,7 @@ export class GameEngineService {
     const fieldWidth = environment.gameSettings.fieldWidth;
     const fieldHeight = environment.gameSettings.fieldHeight;
     const speedCfg = environment.gameSettings.speed;
+    const margin = 20; // existing boundary margin used in goal logic
 
     let ball = { ...currentState.ball };
 
@@ -239,15 +243,32 @@ export class GameEngineService {
     ball.x += ball.vx * dt;
     ball.y += ball.vy * dt;
 
-    // Bounce off walls
-    if (ball.x <= 20 || ball.x >= fieldWidth - 20) {
-      ball.vx *= -0.8;
-      ball.x = Math.max(20, Math.min(fieldWidth - 20, ball.x));
+    // Remove artificial bounces; handle only horizontal rebounds lightly (optional) and throw-ins for vertical exits
+    // Horizontal (goal line) still handled later for goals/corners; if no goal/corner, just stop ball inside
+    if (ball.x <= margin) {
+      ball.x = margin;
+    } else if (ball.x >= fieldWidth - margin) {
+      ball.x = fieldWidth - margin;
     }
-    
-    if (ball.y <= 20 || ball.y >= fieldHeight - 20) {
-      ball.vy *= -0.8;
-      ball.y = Math.max(20, Math.min(fieldHeight - 20, ball.y));
+
+    // Touchlines (top/bottom): if ball exits, trigger throw-in event and reset ball for opposing team possession
+    if (ball.y < margin || ball.y > fieldHeight - margin) {
+      const exitingTop = ball.y < margin;
+      // Determine last possessing team (currentBallOwner) to assign throw-in to opposite
+      let lastOwnerTeamName = 'Unknown';
+      if (currentState.currentBallOwner) {
+        const all = [...(this.team1?.players||[]), ...(this.team2?.players||[])];
+        const lastOwner = all.find(p => p.id === currentState.currentBallOwner);
+        if (lastOwner) {
+          lastOwnerTeamName = this.team1?.players.includes(lastOwner) ? this.team1!.name : this.team2!.name;
+        }
+      }
+      const throwTeam = (lastOwnerTeamName === this.team1?.name) ? (this.team2?.name || 'Team 2') : (this.team1?.name || 'Team 1');
+      this.generateGameEvent('substitution', throwTeam, exitingTop ? 'Throw-In (Top)' : 'Throw-In (Bottom)'); // reuse substitution icon placeholder
+      // Place ball at touchline and give slight inward velocity for restart
+      ball.y = exitingTop ? margin + 2 : fieldHeight - margin - 2;
+      ball.vx = 0;
+      ball.vy = 0;
     }
 
     // Add small randomness when free (no owner)
@@ -308,19 +329,46 @@ export class GameEngineService {
     const ballPos = currentState.ball;
     const everyone = [...this.team1.players, ...this.team2.players];
 
-    // Choose a limited number of chasers (closest 4 non-goalkeepers)
-    const chasers = everyone
-      .filter(p => p.role !== 'goalkeeper')
-      .map(p => ({ p, d: Math.hypot(ballPos.x - p.position.x, ballPos.y - p.position.y) }))
-      .sort((a, b) => a.d - b.d)
-      .slice(0, 4)
-      .map(x => x.p);
+    // Smarter chaser selection: if a team is in possession, prioritize opponents as chasers and limit teammates
+    const currentOwnerId = this.gameState$.value.currentBallOwner;
+    let ownerPlayer: Player | undefined;
+    if (currentOwnerId) ownerPlayer = everyone.find(p => p.id === currentOwnerId);
+    let chasers: Player[] = [];
+    if (ownerPlayer) {
+      const ownerTeam = this.team1.players.includes(ownerPlayer) ? this.team1.players : this.team2.players;
+      const oppTeam = ownerTeam === this.team1.players ? this.team2.players : this.team1.players;
+      const oppChasers = oppTeam
+        .filter(p => p.role !== 'goalkeeper')
+        .map(p => ({ p, d: Math.hypot(ballPos.x - p.position.x, ballPos.y - p.position.y) }))
+        .sort((a,b) => a.d - b.d)
+        .slice(0, 4)
+        .map(x => x.p);
+      const supportRunner = ownerTeam
+        .filter(p => p.role !== 'goalkeeper' && p.id !== ownerPlayer!.id)
+        .map(p => ({ p, d: Math.hypot(ownerPlayer!.position.x - p.position.x, ownerPlayer!.position.y - p.position.y) }))
+        .sort((a,b) => a.d - b.d)
+        .slice(0,1)
+        .map(x => x.p);
+      chasers = [...oppChasers, ...supportRunner];
+    } else {
+      chasers = everyone
+        .filter(p => p.role !== 'goalkeeper')
+        .map(p => ({ p, d: Math.hypot(ballPos.x - p.position.x, ballPos.y - p.position.y) }))
+        .sort((a,b) => a.d - b.d)
+        .slice(0,4)
+        .map(x => x.p);
+    }
 
   const speedCfg = environment.gameSettings.speed;
   // Normalize dt to ~60fps base
   const dtNorm = deltaTime / 16.67;
   const baseMove = speedCfg.playerBase * dtNorm;
     everyone.forEach(player => {
+      // Stamina decay (light) each frame relative to normalized dt
+      if (player.abilities) {
+        const decay = 0.002 * dtNorm * (player.role === 'midfielder' ? 1.2 : 1) * (player.role === 'forward' ? 1.1 : 1);
+        player.abilities.stamina = Math.max(0, player.abilities.stamina - decay);
+      }
       if (player.role === 'goalkeeper') {
         // Goalkeeper: track ball vertically, modest horizontal shift when ball enters attacking half
         const targetY = Math.max(40, Math.min(fieldHeight - 40, ballPos.y));
@@ -341,7 +389,9 @@ export class GameEngineService {
       const dy = ballPos.y - player.position.y;
       const distance = Math.sqrt(dx * dx + dy * dy);
       // Movement weighting using config
-      const chaseFactor = (isChasing ? (1 + speedCfg.chaseExtra) : 0.3) * baseMove;
+  const staminaFactor = player.abilities ? (0.5 + 0.5 * (player.abilities.stamina / player.abilities.maxStamina)) : 1;
+  const speedFactor = player.abilities ? player.abilities.speedFactor : 1;
+  const chaseFactor = (isChasing ? (1 + speedCfg.chaseExtra) : 0.3) * baseMove * speedFactor * staminaFactor;
       const formationFactor = 0.06 * baseMove; // subtle pull to base
 
       // Random jitter to avoid perfect lines
@@ -370,25 +420,83 @@ export class GameEngineService {
     const ball = currentState.ball;
     const allPlayers = [...this.team1.players, ...this.team2.players];
     const speedCfg = environment.gameSettings.speed;
-
-    // Determine possession: closest player within radius
+    const nowTs = Date.now();
     const possessionRadius = 18;
-    let owner: Player | null = null; // explicit type avoids 'never'
-    let minDist = Infinity;
-    allPlayers.forEach(p => {
-      const d = Math.hypot(p.position.x - ball.x, p.position.y - ball.y);
-      if (d < possessionRadius && d < minDist) {
-        minDist = d;
-        owner = p;
+    let owner: Player | null = null;
+    let newOwnerId: string | null = currentState.currentBallOwner;
+    // If we already have an owner, respect lock; otherwise pick nearest
+    if (currentState.currentBallOwner) {
+      owner = allPlayers.find(p => p.id === currentState.currentBallOwner) || null;
+      // Attempt opponent steals if lock expired
+      if (owner && nowTs > this.possessionLockUntil) {
+        const ownerTeamIsTeam1 = this.team1.players.includes(owner);
+        const opponents = ownerTeamIsTeam1 ? this.team2.players : this.team1.players;
+        // Find closest opponent
+        let bestOpp: Player | null = null; let bestDist = Infinity;
+        opponents.forEach(op => {
+          const d = Math.hypot(op.position.x - ball.x, op.position.y - ball.y);
+            if (d < possessionRadius && d < bestDist) { bestDist = d; bestOpp = op; }
+        });
+        if (bestOpp !== null) {
+          const attackerStam = (bestOpp as Player).abilities ? (bestOpp as Player).abilities!.stamina : 50;
+          const defenderStam = owner!.abilities ? owner!.abilities!.stamina : 50;
+          const stealChance = 0.30 + Math.max(-0.15, Math.min(0.25, (attackerStam - defenderStam)/160));
+          if (Math.random() < stealChance) {
+            owner = bestOpp;
+            newOwnerId = (bestOpp as Player).id;
+            this.possessionLockOwner = newOwnerId;
+            this.possessionLockUntil = nowTs + 1400;
+          }
+        }
       }
-    });
-
-    let newOwnerId: string | null = null;
-    if (owner !== null) {
-      newOwnerId = (owner as Player).id;
+    } else {
+      // No current owner: choose nearest
+      let minDist = Infinity;
+      allPlayers.forEach(p => {
+        const d = Math.hypot(p.position.x - ball.x, p.position.y - ball.y);
+        if (d < possessionRadius && d < minDist) { minDist = d; owner = p; }
+      });
+      if (owner) {
+        newOwnerId = (owner as Player).id;
+        this.possessionLockOwner = newOwnerId;
+        this.possessionLockUntil = nowTs + 1500;
+      }
     }
 
-    // Passing logic: if owner exists and cooldown passed, pass forward to a teammate
+    // Apply forward dribble only if owner determined
+    if (owner) {
+      const ownerPlayer = owner;
+      const isLeftTeam = this.team1.players.includes(ownerPlayer);
+      const dir = isLeftTeam ? 1 : -1;
+      // Dribble advance (scaled by playerBase)
+      const advance = speedCfg.playerBase * 0.9;
+      ownerPlayer.position.x += advance * dir;
+      // mild lateral drift toward center line to avoid hugging touchline
+      const centerY = environment.gameSettings.fieldHeight / 2;
+      ownerPlayer.position.y += (centerY - ownerPlayer.position.y) * 0.002 * speedCfg.playerBase;
+      // Keep within field
+      ownerPlayer.position.x = Math.max(30, Math.min(environment.gameSettings.fieldWidth - 30, ownerPlayer.position.x));
+      ownerPlayer.position.y = Math.max(30, Math.min(environment.gameSettings.fieldHeight - 30, ownerPlayer.position.y));
+
+      // TEAM COOPERATION: supporting runs - nearby teammates on same side move forward into space instead of collapsing onto ball
+      const sameTeam = this.team1.players.includes(ownerPlayer) ? this.team1.players : this.team2.players;
+      sameTeam.forEach(tm => {
+        if (tm.id === ownerPlayer.id) return;
+        const dist = Math.hypot(tm.position.x - ownerPlayer.position.x, tm.position.y - ownerPlayer.position.y);
+        if (dist < 180) {
+          // Move into a forward supporting lane: slight horizontal advance + spread vertically
+            const laneDir = dir;
+            tm.position.x += laneDir * speedCfg.playerBase * 0.35;
+            // vertical spacing: push away from owner to create passing lane
+            const verticalSign = (tm.position.y < ownerPlayer.position.y) ? -1 : 1;
+            tm.position.y += verticalSign * 0.25 * speedCfg.playerBase;
+            tm.position.x = Math.max(30, Math.min(environment.gameSettings.fieldWidth - 30, tm.position.x));
+            tm.position.y = Math.max(30, Math.min(environment.gameSettings.fieldHeight - 30, tm.position.y));
+        }
+      });
+    }
+
+    // Passing / shooting logic: if owner exists and cooldown passed, first consider shot, else pass forward
     const now = Date.now();
     if (owner && now - this.lastPassTime > this.passCooldown) {
       const ownerPlayer = owner as Player; // stabilize narrowing for arrow callbacks
@@ -399,13 +507,19 @@ export class GameEngineService {
       const distanceToGoalLine = Math.abs(attackingGoalX - ownerPlayer.position.x);
       const goalMouthHalf = (environment.gameSettings.goalWidthM * (environment.gameSettings.fieldHeight - 20) / environment.gameSettings.pitchWidthM) / 2;
       const withinVerticalGoalSpan = Math.abs(ownerPlayer.position.y - environment.gameSettings.fieldHeight/2) < goalMouthHalf + 120; // generous corridor
-      if (distanceToGoalLine < 140 && withinVerticalGoalSpan) {
+      // Increase shooting frequency by enlarging trigger window and adding probability weighting
+      const staminaFactor = ownerPlayer.abilities ? (0.5 + 0.5 * (ownerPlayer.abilities.stamina / ownerPlayer.abilities.maxStamina)) : 1;
+      const powerFactor = ownerPlayer.abilities ? (0.6 + ownerPlayer.abilities.shotPower / 100 * 0.8) : 1; // 0.6 - 1.4
+      const accuracyFactor = ownerPlayer.abilities ? (0.5 + ownerPlayer.abilities.accuracy / 100 * 0.5) : 1; // 0.5 - 1.0 spread reduction
+      const shootProbability = distanceToGoalLine < 90 ? 0.75 + (powerFactor - 1) * 0.2 : distanceToGoalLine < 140 ? 0.45 + (powerFactor - 1) * 0.15 : 0;
+      if (shootProbability > 0 && Math.random() < shootProbability && withinVerticalGoalSpan) {
         // Attempt shot
-        const targetY = (environment.gameSettings.fieldHeight / 2) + (Math.random() - 0.5) * goalMouthHalf * 1.6; // random within expanded goal area
+        const aimSpread = goalMouthHalf * (1.2 - 0.7 * accuracyFactor); // better accuracy narrows spread
+        const targetY = (environment.gameSettings.fieldHeight / 2) + (Math.random() - 0.5) * aimSpread;
         const dxShot = attackingGoalX - ball.x;
         const dyShot = targetY - ball.y;
         const dShot = Math.hypot(dxShot, dyShot) || 1;
-        const shotSpeed = speedCfg.shotSpeed;
+        const shotSpeed = speedCfg.shotSpeed * powerFactor * staminaFactor;
         const vxShot = (dxShot / dShot) * shotSpeed;
         const vyShot = (dyShot / dShot) * shotSpeed;
         const updatedBall = { ...ball, vx: vxShot, vy: vyShot };
@@ -415,16 +529,36 @@ export class GameEngineService {
         return;
       }
       // Prefer players further forward in owner's attack direction
-      const forwardCandidates: Player[] = sameTeam.filter(p => p.id !== ownerPlayer.id && (ownerSideLeft ? p.position.x > ownerPlayer.position.x : p.position.x < ownerPlayer.position.x));
-      const candidates: Player[] = forwardCandidates.length > 0 ? forwardCandidates : sameTeam.filter(p => p.id !== ownerPlayer.id);
+      let forwardCandidates: Player[] = sameTeam.filter(p => p.id !== ownerPlayer.id && (ownerSideLeft ? p.position.x > ownerPlayer.position.x : p.position.x < ownerPlayer.position.x));
+      // Weight candidates by how advanced they are (favor through play)
+      if (forwardCandidates.length > 0) {
+        forwardCandidates = forwardCandidates.sort((a,b) => ownerSideLeft ? b.position.x - a.position.x : a.position.x - b.position.x).slice(0,4);
+      }
+      const fallback = sameTeam.filter(p => p.id !== ownerPlayer.id);
+      const candidates: Player[] = forwardCandidates.length > 0 ? forwardCandidates : fallback;
       if (candidates.length > 0) {
-        const target = candidates[Math.floor(Math.random() * candidates.length)];
+        // bias toward first (most advanced) 60% of the time
+        let target: Player;
+        if (Math.random() < 0.6) {
+          target = candidates[0];
+        } else {
+          target = candidates[Math.floor(Math.random() * candidates.length)];
+        }
         const dx = target.position.x - ball.x;
         const dy = target.position.y - ball.y;
         const dist = Math.hypot(dx, dy) || 1;
-        const passSpeed = environment.gameSettings.speed.passSpeed;
-        const vx = (dx / dist) * passSpeed;
-        const vy = (dy / dist) * passSpeed;
+        const passPowerFactor = ownerPlayer.abilities ? (0.5 + ownerPlayer.abilities.passPower / 100 * 0.9) : 1; // 0.5 - 1.4
+        const passAccuracyFactor = ownerPlayer.abilities ? (0.5 + ownerPlayer.abilities.accuracy / 100 * 0.5) : 1;
+        const passSpeed = environment.gameSettings.speed.passSpeed * passPowerFactor;
+        // Slight target leading using target speedFactor
+        const lead = target.abilities ? (target.abilities.speedFactor * 4) : 2;
+        const targetX = target.position.x + (ownerSideLeft ? lead : -lead);
+        const targetY = target.position.y + (Math.random() - 0.5) * (18 / passAccuracyFactor); // less vertical randomness with higher accuracy
+        const ndx = targetX - ball.x;
+        const ndy = targetY - ball.y;
+        const ndist = Math.hypot(ndx, ndy) || 1;
+        const vx = (ndx / ndist) * passSpeed;
+        const vy = (ndy / ndist) * passSpeed;
         const updated = { ...currentState.ball, vx, vy };
         this.gameState$.next({ ...currentState, ball: updated, currentBallOwner: ownerPlayer.id });
         this.lastPassTime = now;
@@ -439,15 +573,55 @@ export class GameEngineService {
     }
   }
 
+  private lastFoulTime = 0;
+  private foulCooldownMs = 4000;
   private generateRandomEvents(): void {
-    // Remove random goal generation; keep rare fouls & offsides for flavor
+    if (!this.team1 || !this.team2) return;
+    const now = Date.now();
+    const everyone = [...this.team1.players, ...this.team2.players];
+
+    // Collision-based foul chance with cooldown and velocity component to reduce spam
+    if (now - this.lastFoulTime > this.foulCooldownMs) {
+      const foulCandidates: { offender: Player; team: Team; impact: number }[] = [];
+      for (let i = 0; i < everyone.length; i++) {
+        for (let j = i + 1; j < everyone.length; j++) {
+          const a = everyone[i];
+          const b = everyone[j];
+          const same = (this.team1.players.includes(a) && this.team1.players.includes(b)) || (this.team2.players.includes(a) && this.team2.players.includes(b));
+          if (same) continue;
+          const d = Math.hypot(a.position.x - b.position.x, a.position.y - b.position.y);
+          if (d < 18) { // tighter collision distance
+            // approximate impact by recent ball speed relevance (if close to ball)
+            foulCandidates.push({ offender: a, team: this.team1.players.includes(a) ? this.team1 : this.team2, impact: 1 / (d + 1) });
+          }
+        }
+      }
+      if (foulCandidates.length > 0 && Math.random() < 0.18) {
+        const chosen = foulCandidates[Math.floor(Math.random() * foulCandidates.length)];
+        const eventTypeRoll = Math.random();
+        let ev: string = 'foul';
+        if (eventTypeRoll > 0.93) ev = 'yellow_card';
+        this.generateGameEvent(ev, chosen.team.name, chosen.offender.name);
+        this.lastFoulTime = now;
+        return;
+      }
+    }
+
+    // Reduced frequency offside logic
     if (Math.random() < 0.0012) {
-      const eventTypes = ['foul', 'offside', 'yellow_card'];
-      const chosen = eventTypes[Math.floor(Math.random() * eventTypes.length)];
-      const team = Math.random() < 0.5 ? this.team1 : this.team2;
-      if (team) {
-        const player = team.players[Math.floor(Math.random() * team.players.length)];
-        this.generateGameEvent(chosen, team.name, player.name);
+      const leftAttackers = this.team1.players.filter(p => p.role !== 'goalkeeper');
+      const rightAttackers = this.team2.players.filter(p => p.role !== 'goalkeeper');
+      if (leftAttackers.length && rightAttackers.length) {
+        const leftMostDefenderRightTeam = Math.min(...rightAttackers.map(p => p.position.x));
+        const rightMostDefenderLeftTeam = Math.max(...leftAttackers.map(p => p.position.x));
+        const potentialOffsideLeft = leftAttackers.filter(p => p.position.x > leftMostDefenderRightTeam + 35);
+        const potentialOffsideRight = rightAttackers.filter(p => p.position.x < rightMostDefenderLeftTeam - 35);
+        const pool = [...potentialOffsideLeft, ...potentialOffsideRight];
+        if (pool.length > 0) {
+          const offender = pool[Math.floor(Math.random() * pool.length)];
+          const offenderTeam = this.team1.players.includes(offender) ? this.team1 : this.team2;
+          this.generateGameEvent('offside', offenderTeam.name, offender.name);
+        }
       }
     }
   }

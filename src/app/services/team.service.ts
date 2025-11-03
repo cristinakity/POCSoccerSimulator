@@ -12,6 +12,16 @@ export interface Player {
   name: string;
   position: { x: number; y: number };
   role: 'goalkeeper' | 'defender' | 'midfielder' | 'forward';
+  abilities?: PlayerAbilities; // optional until generated
+}
+
+export interface PlayerAbilities {
+  passPower: number;   // 0-100
+  shotPower: number;   // 0-100
+  accuracy: number;    // 0-100 (aim precision)
+  stamina: number;     // 0-100 (current stamina)
+  maxStamina: number;  // 60-100 (ceiling)
+  speedFactor: number; // 0.8 - 1.2 multiplier over base speed
 }
 
 export interface GameEvent {
@@ -82,12 +92,30 @@ export class TeamService {
       'forward', 'forward', 'forward'
     ];
 
-    return roles.map((role, index) => ({
-      id: `player_${index}`,
-      name: shuffledPlayerNames[index] || `Player ${index + 1}`,
-      position: { x: 0, y: 0 }, // Will be set during game initialization
-      role
-    }));
+    return roles.map((role, index) => {
+      const baseSkill = () => Math.floor(50 + Math.random() * 50); // 50-100
+      const powerVariance = role === 'forward' ? 10 : role === 'midfielder' ? 0 : -5;
+      const speedVariance = role === 'forward' ? 0.1 : role === 'midfielder' ? 0.05 : role === 'defender' ? -0.05 : -0.1;
+      const passPower = Math.min(100, Math.max(30, baseSkill() + (role === 'midfielder' ? 5 : 0)));
+      const shotPower = Math.min(100, Math.max(35, baseSkill() + powerVariance));
+      const accuracy = Math.min(100, Math.max(40, baseSkill() + (role === 'forward' ? 5 : 0)));
+      const maxStamina = Math.floor(60 + Math.random() * 40); // 60-100
+      const abilities: PlayerAbilities = {
+        passPower,
+        shotPower,
+        accuracy,
+        stamina: maxStamina,
+        maxStamina,
+        speedFactor: 1 + speedVariance + (Math.random() - 0.5) * 0.1 // small randomness
+      };
+      return {
+        id: `player_${index}`,
+        name: shuffledPlayerNames[index] || `Player ${index + 1}`,
+        position: { x: 0, y: 0 }, // Will be set during game initialization
+        role,
+        abilities
+      } as Player;
+    });
   }
 
   getRandomEventDescription(eventType: string, playerName: string, teamName: string): string {
