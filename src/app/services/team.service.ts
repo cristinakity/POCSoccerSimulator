@@ -26,7 +26,7 @@ export interface PlayerAbilities {
 
 export interface GameEvent {
   time: number;
-  type: 'goal' | 'foul' | 'substitution' | 'corner' | 'offside' | 'yellow_card' | 'red_card' | 'pass' | 'shot';
+  type: 'goal' | 'foul' | 'substitution' | 'corner' | 'offside' | 'yellow_card' | 'red_card' | 'pass' | 'shot' | 'coin_toss' | 'kickoff';
   team: string;
   player: string;
   description: string;
@@ -163,6 +163,16 @@ export class TeamService {
         `Powerful attempt by ${playerName}!`,
         `${playerName} tries one from distance.`,
         `${playerName} fires toward goal!`
+      ],
+      coin_toss: [
+        `Coin toss underway...`,
+        `The referee flips the coin.`,
+        `Teams await the coin toss outcome.`
+      ],
+      kickoff: [
+        `Kickoff! ${teamName} starts the match.`,
+        `${teamName} gets us underway.`,
+        `The ball rolls — match begins!`
       ]
     };
 

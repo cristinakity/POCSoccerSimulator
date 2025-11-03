@@ -10,6 +10,7 @@ export interface GameState {
   ball: { x: number; y: number; vx: number; vy: number };
   events: GameEvent[];
   currentBallOwner: string | null;
+  phase?: 'pregame' | 'kickoff' | 'inplay' | 'finished';
 }
 
 @Injectable({ providedIn: 'root' })
@@ -20,7 +21,8 @@ export class GameEngineService {
     score: { team1: 0, team2: 0 },
     ball: { x: 450, y: 300, vx: 0, vy: 0 },
     events: [],
-    currentBallOwner: null
+    currentBallOwner: null,
+    phase: 'pregame'
   });
   private gameEvents$ = new Subject<GameEvent>();
   private animationFrameId: number | null = null;
@@ -48,35 +50,66 @@ export class GameEngineService {
     this.team1 = team1; this.team2 = team2; this.gameDuration = duration;
     this.ensureDistinctTeamColors();
     this.initializePlayerPositions();
+    const fieldW = environment.gameSettings.fieldWidth;
+    const fieldH = environment.gameSettings.fieldHeight;
     const initialState: GameState = {
-      isRunning: true,
+      isRunning: false,
       timeRemaining: duration,
       score: { team1: 0, team2: 0 },
-      ball: { x: 450, y: 300, vx: Math.random() * 4 - 2, vy: Math.random() * 4 - 2 },
+      ball: { x: fieldW/2, y: fieldH/2, vx: 0, vy: 0 },
       events: [],
-      currentBallOwner: null
+      currentBallOwner: null,
+      phase: 'pregame'
     };
     this.gameState$.next(initialState);
-    const kickoffTeam = Math.random() < 0.5 ? this.team1 : this.team2;
-    const kickoffPlayer = kickoffTeam?.players.find(p => p.role === 'midfielder') || kickoffTeam?.players[0];
+    // Coin toss determines kickoff
+    const coinWinner = Math.random() < 0.5 ? this.team1! : this.team2!;
+    this.generateGameEvent('coin_toss', coinWinner.name, 'Referee');
+    // Assign kickoff player (center midfielder preferred)
+    const midfielders = coinWinner.players.filter(p => p.role === 'midfielder');
+    const kickoffPlayer = midfielders.sort((a,b) => Math.hypot(a.position.x-fieldW/2,a.position.y-fieldH/2) - Math.hypot(b.position.x-fieldW/2,b.position.y-fieldH/2))[0] || coinWinner.players[0];
     if (kickoffPlayer) {
+      kickoffPlayer.position.x = fieldW/2 - (this.team1 === coinWinner ? 8 : -8);
+      kickoffPlayer.position.y = fieldH/2;
       this.gameState$.next({
         ...this.gameState$.value,
         currentBallOwner: kickoffPlayer.id,
-        ball: { ...this.gameState$.value.ball, x: kickoffPlayer.position.x, y: kickoffPlayer.position.y, vx: 0, vy: 0 }
+        ball: { ...this.gameState$.value.ball, x: fieldW/2, y: fieldH/2, vx: 0, vy: 0 },
+        phase: 'kickoff'
       });
       this.possessionStartTime = Date.now();
       this.possessionLockOwner = kickoffPlayer.id;
-      this.possessionLockUntil = Date.now() + 900;
+      this.possessionLockUntil = Date.now() + 600;
     }
-    this.recentOwners = [];
-    this.stagnationStartTs = Date.now();
-    this.stagnationRefX = initialState.ball.x;
-    this.lastTime = Date.now();
-    this.lastPassTime = this.lastTime;
+    this.recentOwners = []; this.stagnationStartTs = Date.now(); this.stagnationRefX = fieldW/2;
+    this.lastTime = Date.now(); this.lastPassTime = this.lastTime;
+    // Slightly lower early pass cooldown to encourage opening interaction
+    this.passCooldown = 1600; this.basePassCooldown = 1600;
     this.startGameLoop();
-    this.startGameTimer();
-    this.generateGameEvent('substitution', 'Game Start', 'The match begins!');
+    // Perform kickoff touch/pass then start timer & phase inplay
+    setTimeout(() => {
+      const gs = this.gameState$.value;
+      if (gs.phase !== 'kickoff') return;
+      const owner = [...(this.team1?.players||[]), ...(this.team2?.players||[])].find(p => p.id === gs.currentBallOwner);
+      if (owner) {
+        const dir = (this.team1?.players.includes(owner) ? 1 : -1);
+        const teamPlayers = (this.team1?.players.includes(owner) ? this.team1!.players : this.team2!.players).filter(p => p.id !== owner.id);
+        const target = teamPlayers.find(p => p.role === 'midfielder') || teamPlayers[0];
+        if (target) {
+          const dx = (target.position.x - gs.ball.x) || dir * 22;
+          const dy = (target.position.y - gs.ball.y) || (Math.random()-0.5)*14;
+          const dist = Math.hypot(dx, dy) || 1;
+          const speedCfg = environment.gameSettings.speed;
+          const vx = (dx/dist) * speedCfg.passSpeed * 0.65;
+          const vy = (dy/dist) * speedCfg.passSpeed * 0.65;
+          this.gameState$.next({ ...gs, ball: { ...gs.ball, vx, vy }, currentBallOwner: null });
+          this.generateGameEvent('kickoff', coinWinner.name, owner.name);
+          this.lastPassTime = Date.now();
+        }
+      }
+      this.gameState$.next({ ...this.gameState$.value, isRunning: true, phase: 'inplay' });
+      this.startGameTimer();
+    }, 1200);
   }
 
   stopGame(): void {
@@ -99,17 +132,66 @@ export class GameEngineService {
     if (!this.team1 || !this.team2) return;
     const fieldW = environment.gameSettings.fieldWidth;
     const fieldH = environment.gameSettings.fieldHeight;
-    const leftXBase = 120;
-    const rightXBase = fieldW - 120;
-    const distribute = (team: Team, isLeft: boolean) => {
-      team.players.forEach((p, idx) => {
-        const col = idx % 3; const row = Math.floor(idx / 3);
-        p.position.x = (isLeft ? leftXBase : rightXBase) + (col - 1) * 55 * (isLeft ? 1 : -1);
-        p.position.y = fieldH/2 + (row - 1.5) * 55;
-        (p as any).basePosition = { x: p.position.x, y: p.position.y };
-      });
+    // Formation templates for our fixed role counts (1 GK, 4 DEF, 3 MID, 3 FWD)
+    // Each formation defines relative X (depth) for lines and spread factors for Y.
+    const formations = [
+      { name: '4-3-3_standard', defX: 0.18, midX: 0.42, fwdX: 0.68, defSpread: 0.42, midSpread: 0.50, fwdSpread: 0.55 },
+      { name: '4-3-3_wide', defX: 0.20, midX: 0.45, fwdX: 0.70, defSpread: 0.48, midSpread: 0.58, fwdSpread: 0.70 },
+      { name: '4-4-2_shape', defX: 0.22, midX: 0.48, fwdX: 0.72, defSpread: 0.46, midSpread: 0.60, fwdSpread: 0.40 },
+      { name: '3-4-3_press', defX: 0.26, midX: 0.50, fwdX: 0.74, defSpread: 0.55, midSpread: 0.62, fwdSpread: 0.58 },
+      { name: '5-3-2_block', defX: 0.16, midX: 0.40, fwdX: 0.66, defSpread: 0.50, midSpread: 0.46, fwdSpread: 0.30 }
+    ];
+    const pickFormation = () => formations[Math.floor(Math.random()*formations.length)];
+    const placeTeam = (team: Team, isLeft: boolean) => {
+      const f = pickFormation();
+      const dir = isLeft ? 1 : -1;
+      // Separate players by role
+      const gk = team.players.find(p => p.role === 'goalkeeper');
+      const defenders = team.players.filter(p => p.role === 'defender');
+      const mids = team.players.filter(p => p.role === 'midfielder');
+      const fwds = team.players.filter(p => p.role === 'forward');
+      const centerY = fieldH/2;
+      // Helper to assign a line (players array, depth factor, spread factor)
+      const assignLine = (pls: Player[], depth: number, spread: number, verticalJitter: number = 18) => {
+        if (!pls.length) return;
+        // Sort for consistent ordering, then distribute across spread vertically
+        const n = pls.length;
+        pls.forEach((p, i) => {
+          const rel = n === 1 ? 0 : (i/(n-1) - 0.5); // -0.5 .. 0.5
+          const y = centerY + rel * spread * fieldH + (Math.random()-0.5)*verticalJitter;
+          const baseX = depth * fieldW;
+          // Mirror for right side team
+          const x = isLeft ? baseX : fieldW - baseX;
+          p.position.x = x + (Math.random()-0.5)*14; // small horizontal jitter
+          p.position.y = Math.max(40, Math.min(fieldH-40, y));
+          (p as any).basePosition = { x: p.position.x, y: p.position.y };
+        });
+      };
+      // Goalkeeper near own goal area
+      if (gk) {
+        const gkDepth = 0.06 * fieldW;
+        gk.position.x = isLeft ? gkDepth : fieldW - gkDepth;
+        gk.position.y = centerY + (Math.random()-0.5)*30;
+        (gk as any).basePosition = { x: gk.position.x, y: gk.position.y };
+      }
+      // Adjust counts for formations that imply different line numbers (e.g., 5 defenders)
+      // We keep roster static; for 5-3-2 we push one forward deeper as wing-back style.
+      if (f.name === '5-3-2_block' && defenders.length === 4 && fwds.length === 3) {
+        // Temporarily treat one forward as an auxiliary defender for shape
+        const aux = fwds.pop();
+        if (aux) defenders.push(aux);
+      }
+      if (f.name === '3-4-3_press' && defenders.length === 4 && mids.length === 3) {
+        // Pull one defender into midfield line to mimic 3-4 shape
+        const pulled = defenders.pop();
+        if (pulled) mids.push(pulled);
+      }
+      assignLine(defenders, f.defX, f.defSpread);
+      assignLine(mids, f.midX, f.midSpread);
+      assignLine(fwds, f.fwdX, f.fwdSpread);
     };
-    distribute(this.team1, true); distribute(this.team2, false);
+    placeTeam(this.team1, true);
+    placeTeam(this.team2, false);
   }
 
   private startGameLoop(): void {
@@ -277,6 +359,7 @@ export class GameEngineService {
   }
   private updatePossessionAndPassing(deltaTime: number): void {
     if (!this.team1 || !this.team2) return;
+    if (this.gameState$.value.phase && (this.gameState$.value.phase === 'pregame' || this.gameState$.value.phase === 'kickoff')) return;
     const state = this.gameState$.value;
     const ball = state.ball;
     const all = [...this.team1.players, ...this.team2.players];
@@ -568,7 +651,9 @@ export class GameEngineService {
       yellow_card: `🟨 Yellow card for ${playerName}!`,
       substitution: `🔄 ${playerName}`,
       pass: `➡️ ${playerName} passes the ball.`,
-      shot: `🎯 ${playerName} takes a shot!`
+      shot: `🎯 ${playerName} takes a shot!`,
+      coin_toss: `🪙 Coin toss won by ${teamName}.`,
+      kickoff: `🔔 Kickoff by ${playerName} for ${teamName}.`
     };
 
     return events[eventType as keyof typeof events] || `${playerName} is involved in the action!`;
