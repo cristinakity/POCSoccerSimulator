@@ -298,13 +298,20 @@ export class GameEngineService {
     const attackingTeam = ownerIsTeam1 == null ? null : (ownerIsTeam1 ? this.team1! : this.team2!);
     const defendingTeam = ownerIsTeam1 == null ? null : (ownerIsTeam1 ? this.team2! : this.team1!);
 
-    // Limited pressers from defending side
+    // Pressers: when ball is owned, limit to 2 defenders; when loose, pick closest 3 from all players
     let pressers: Player[] = [];
-    if (defendingTeam) {
+    if (ballOwner && defendingTeam) {
       pressers = defendingTeam.players.filter(p => p.role !== 'goalkeeper')
         .map(p => ({ p, d: Math.hypot(p.position.x - ball.x, p.position.y - ball.y) }))
         .sort((a, b) => a.d - b.d)
         .slice(0, 2)
+        .map(o => o.p);
+    } else if (!ballOwner) {
+      // Loose ball: closest 3 players from both teams chase
+      pressers = allPlayers.filter(p => p.role !== 'goalkeeper')
+        .map(p => ({ p, d: Math.hypot(p.position.x - ball.x, p.position.y - ball.y) }))
+        .sort((a, b) => a.d - b.d)
+        .slice(0, 3)
         .map(o => o.p);
     }
 
@@ -320,49 +327,69 @@ export class GameEngineService {
       const dir = this.isTeam1(p) ? 1 : -1;
       const basePos = (p as any).basePosition || { x: p.position.x, y: p.position.y };
       if (isOwner) {
-        const staminaFactor = p.abilities?.stamina && p.abilities?.maxStamina ? (0.5 + p.abilities.stamina / p.abilities.maxStamina) : 1;
-        const speedFactor = (p.abilities?.speedFactor ?? 1) * staminaFactor;
-        p.position.x += dir * baseSpeed * 0.65 * speedFactor;
-        p.position.y += (this.rand() - 0.5) * baseSpeed * 0.45 * (p.abilities?.agility ?? 60) / 100;
+        // Dribbler: smooth forward advance with minimal lateral noise
+        const staminaFactor = p.abilities?.stamina && p.abilities?.maxStamina ? Math.max(0.6, p.abilities.stamina / p.abilities.maxStamina) : 1;
+        const speedFactor = Math.min(1.2, (p.abilities?.speedFactor ?? 1) * staminaFactor);
+        p.position.x += dir * baseSpeed * 0.4 * speedFactor;
+        p.position.y += (this.rand() - 0.5) * baseSpeed * 0.15;
       } else if (pressers.includes(p)) {
+        // Pressers: smooth approach, capped speed
         const dx = ball.x - p.position.x; const dy = ball.y - p.position.y; const d = Math.hypot(dx, dy) || 1;
-        const pressSpeed = baseSpeed * 1.25 * (p.abilities?.speedFactor ?? 1);
-        p.position.x += (dx / d) * pressSpeed; p.position.y += (dy / d) * pressSpeed;
+        const pressSpeed = Math.min(baseSpeed * 1.1, baseSpeed * 0.9 * (p.abilities?.speedFactor ?? 1));
+        const moveX = (dx / d) * pressSpeed; const moveY = (dy / d) * pressSpeed;
+        p.position.x += moveX * 0.7; p.position.y += moveY * 0.7;
       } else if (support && p.id === support.id) {
-        const offsetX = (ball.x - basePos.x) * 0.30;
-        const offsetY = (ball.y - basePos.y) * 0.40 + (this.rand() - 0.5) * 20;
+        // Support runner: smooth offset toward space near ball
+        const offsetX = (ball.x - basePos.x) * 0.20;
+        const offsetY = (ball.y - basePos.y) * 0.25;
         const targetX = basePos.x + offsetX; const targetY = basePos.y + offsetY;
         const dx = targetX - p.position.x; const dy = targetY - p.position.y; const d = Math.hypot(dx, dy) || 1;
-        p.position.x += (dx / d) * baseSpeed * 0.9; p.position.y += (dy / d) * baseSpeed * 0.9;
+        if (d > 3) {
+          p.position.x += (dx / d) * baseSpeed * 0.5; p.position.y += (dy / d) * baseSpeed * 0.5;
+        }
       } else {
-        let shiftX = (ball.x - this.W / 2) * 0.05 * dir;
-        let shiftY = (ball.y - this.H / 2) * 0.08;
+        // Shape holders: gentle drift toward formation position with contextual shift
+        let shiftX = (ball.x - this.W / 2) * 0.03 * dir;
+        let shiftY = (ball.y - this.H / 2) * 0.05;
         if (ballOwner) {
           const sameSide = ownerIsTeam1 === this.isTeam1(p);
           if (sameSide) {
             const behindBall = (p.position.x * dir) < (ball.x * dir - 60);
-            if (behindBall) shiftX += 20 * dir;
+            if (behindBall) shiftX += 12 * dir;
           } else {
             const aheadBall = (p.position.x * dir) > (ball.x * dir + 30);
-            if (aheadBall) shiftX -= 15 * dir;
+            if (aheadBall) shiftX -= 10 * dir;
           }
         }
         const targetX = Math.max(0, Math.min(this.W, basePos.x + shiftX));
         const targetY = Math.max(0, Math.min(this.H, basePos.y + shiftY));
         const dx = targetX - p.position.x; const dy = targetY - p.position.y; const d = Math.hypot(dx, dy) || 1;
-        p.position.x += (dx / d) * baseSpeed * 0.6; p.position.y += (dy / d) * baseSpeed * 0.6;
+        if (d > 2) {
+          p.position.x += (dx / d) * baseSpeed * 0.35; p.position.y += (dy / d) * baseSpeed * 0.35;
+        }
       }
       p.position.x = Math.max(0, Math.min(this.W, p.position.x));
       p.position.y = Math.max(0, Math.min(this.H, p.position.y));
     });
 
-    // Separation pass
+    // Loose ball pickup: if no owner and a player is close enough, give possession
+    if (!ballOwner) {
+      for (const p of allPlayers) {
+        const dist = Math.hypot(p.position.x - ball.x, p.position.y - ball.y);
+        if (dist < 8) {
+          this.setBallOwner(p);
+          break;
+        }
+      }
+    }
+
+    // Separation pass to prevent overlapping
     for (let i = 0; i < allPlayers.length; i++) {
       for (let j = i + 1; j < allPlayers.length; j++) {
         const a = allPlayers[i]; const b = allPlayers[j];
         let dx = b.position.x - a.position.x; let dy = b.position.y - a.position.y; const dist = Math.hypot(dx, dy);
-        if (dist > 0 && dist < 14) {
-          const push = (14 - dist) * 0.5; dx /= dist; dy /= dist;
+        if (dist > 0 && dist < 12) {
+          const push = (12 - dist) * 0.3; dx /= dist; dy /= dist;
           a.position.x -= dx * push; a.position.y -= dy * push;
           b.position.x += dx * push; b.position.y += dy * push;
           a.position.x = Math.max(0, Math.min(this.W, a.position.x)); a.position.y = Math.max(0, Math.min(this.H, a.position.y));
