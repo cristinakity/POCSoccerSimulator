@@ -30,7 +30,7 @@ export interface PlayerAbilities {
 
 export interface GameEvent {
   time: number;
-  type: 'goal' | 'foul' | 'substitution' | 'corner' | 'offside' | 'yellow_card' | 'red_card' | 'pass' | 'shot' | 'coin_toss' | 'kickoff' | 'throw_in' | 'tackle' | 'interception' | 'clearance' | 'goal_kick' | 'save' | 'penalty';
+  type: 'goal' | 'foul' | 'substitution' | 'corner' | 'offside' | 'yellow_card' | 'red_card' | 'pass' | 'shot' | 'coin_toss' | 'kickoff' | 'throw_in' | 'tackle' | 'interception' | 'clearance' | 'goal_kick' | 'save' | 'penalty' | 'formation_change' | 'injury' | 'momentum' | 'weather_shift';
   team: string;
   player: string;
   description: string;
@@ -49,6 +49,7 @@ export interface GameEvent {
   xg?: number;        // expected goal value (0-1) for shot-related events
   pressure?: number;  // distance of nearest opponent at action time
   facingError?: number; // angular difference between player facing and action direction (radians)
+  momentumIndex?: number; // attacking pressure indicator
 }
 
 @Injectable({

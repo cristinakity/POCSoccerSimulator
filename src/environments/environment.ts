@@ -9,7 +9,7 @@ export const environment = {
     pitchWidthM: 68,   // meters (goal to goal width)
     goalWidthM: 7.32,
     goalAreaDepthM: 5.5,
-    penaltyAreaDepthM: 16.5,
+  // penaltyAreaDepthM already declared above; remove duplicate entry
     penaltySpotDistM: 11,
     centerCircleRadiusM: 9.15,
     speed: {
@@ -27,6 +27,11 @@ export const environment = {
     decisionIntervalMs: 110, // AI decision cadence (ms)
     randomSeed: null as number | null, // set to a number for deterministic simulation
     ballDecayFree: 0.985, // decay applied each frame when ball free (overrides frictionFree if set)
-    ballDecayPossessed: 0.994 // decay when dribbling (matches frictionPossessed by default)
+    ballDecayPossessed: 0.994, // decay when dribbling (matches frictionPossessed by default)
+    weather: 'clear' as 'clear' | 'rain' | 'heat', // affects stamina & friction
+    crowdIntensity: 0.5, // 0-1 influences momentum commentary
+    penaltyAreaDepthM: 16.5,
+    xgTuning: { distanceScale: 250, angleScale: 1, pressureScale: 160 },
+    passUtilityWeights: { progress: 0.55, support: 0.25, risk: 0.20 }
   }
 };
