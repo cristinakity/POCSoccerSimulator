@@ -205,6 +205,12 @@ export class TeamService {
         `Great defending forces a corner kick!`,
         `${teamName} gets a dangerous corner opportunity!`
       ],
+      goal_kick: [
+        `Goal kick for ${teamName}.`,
+        `${teamName} prepares a goal kick.`,
+        `${playerName} places it for a goal kick.`,
+        `Restart with a goal kick to ${teamName}.`
+      ],
       offside: [
         `${playerName} is caught offside!`,
         `Offside! ${playerName} was too eager!`,

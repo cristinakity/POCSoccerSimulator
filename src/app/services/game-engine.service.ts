@@ -250,6 +250,50 @@ export class GameEngineService {
         this.handleThrowIn(x, y);
         return; // restart performed
       }
+      // Goal / corner / goal kick detection when crossing goal lines
+      const goalWidthM = environment.gameSettings.goalWidthM;
+      const pitchWidthM = environment.gameSettings.pitchWidthM;
+      const scaleY = (fieldH - 20) / pitchWidthM; // vertical scaling across drawable area
+      const goalHalfPx = (goalWidthM * scaleY) / 2; // half aperture in px
+      const goalCenterY = fieldH / 2;
+      const inGoalAperture = Math.abs(y - goalCenterY) <= goalHalfPx;
+      const crossedLeft = x < 5;
+      const crossedRight = x > fieldW - 5;
+      if (crossedLeft || crossedRight) {
+        const scoringTeam = crossedRight ? 'team1' : 'team2'; // team1 attacks right, team2 attacks left
+        const defendingTeam = crossedRight ? 'team2' : 'team1';
+        if (inGoalAperture) {
+          // Goal scored
+          this.updateScore(scoringTeam as 'team1'|'team2');
+          // Metadata for goal event
+          (this as any)._eventExtra = {
+            startX: x,
+            startY: y,
+            endX: x,
+            endY: y,
+            subtype: 'goal',
+            result: 'goal'
+          };
+          const scorer = this.lastShooter || null;
+          const teamName = scoringTeam === 'team1' ? this.team1?.name || 'Team 1' : this.team2?.name || 'Team 2';
+          const playerName = scorer ? scorer.name : 'Unknown';
+          this.generateGameEvent('goal', teamName, playerName);
+          this.resetForKickoff();
+          return;
+        } else {
+          // Corner or goal kick: determine last touch side
+          const lastTouchTeam = this.lastTouchTeam || scoringTeam; // fallback
+          const attackingTeam = scoringTeam === 'team1' ? (crossedRight ? 'team1' : 'team2') : (crossedLeft ? 'team2' : 'team1');
+          // If last touch by attacker -> goal kick for defenders; else corner for attackers
+          const isGoalKick = (lastTouchTeam === (scoringTeam === 'team1' ? 'team1' : 'team2'));
+          if (isGoalKick) {
+            this.performGoalKick(defendingTeam as 'team1'|'team2', crossedLeft ? 'left' : 'right');
+          } else {
+            this.performCorner(attackingTeam === 'team1' ? this.team1! : this.team2!, crossedLeft ? 'left' : 'right', y < goalCenterY ? 'top' : 'bottom');
+          }
+          return;
+        }
+      }
       // (Future: goal line exits x < 0 or x > fieldW could become corner/goal_kick events)
     }
     this.gameState$.next({ ...state, ball: { x, y, vx, vy } });
@@ -748,6 +792,58 @@ export class GameEngineService {
     };
 
     return events[eventType as keyof typeof events] || `${playerName} is involved in the action!`;
+  }
+
+  // Track last shooter & touch for restart logic
+  private lastShooter: Player | null = null;
+  private lastTouchTeam: 'team1' | 'team2' | null = null;
+  private resetForKickoff(): void {
+    const gs = this.gameState$.value;
+    // Center ball and null owner -> kickoff phase could be added later, for now immediate play restart
+    const fieldW = environment.gameSettings.fieldWidth;
+    const fieldH = environment.gameSettings.fieldHeight;
+    this.gameState$.next({
+      ...gs,
+      ball: { x: fieldW / 2, y: fieldH / 2, vx: 0, vy: 0 },
+      currentBallOwner: null
+    });
+  }
+
+  private performCorner(team: Team, side: 'left' | 'right', quadrant: 'top' | 'bottom'): void {
+    const gs = this.gameState$.value;
+    const fieldW = environment.gameSettings.fieldWidth;
+    const fieldH = environment.gameSettings.fieldHeight;
+    const x = side === 'left' ? 30 : fieldW - 30;
+    const y = quadrant === 'top' ? 30 : fieldH - 30;
+    // Choose taker: nearest wide midfielder/winger preference else nearest player
+    let taker: Player = team.players[0];
+    let bestScore = Infinity;
+    for (const p of team.players) {
+      const dist = Math.hypot(p.position.x - x, p.position.y - y);
+      if (dist < bestScore) { bestScore = dist; taker = p; }
+    }
+    this.gameState$.next({ ...gs, ball: { x, y, vx: 0, vy: 0 }, currentBallOwner: taker.id });
+    (this as any)._eventExtra = {
+      startX: x, startY: y, endX: x, endY: y, role: taker.role, subtype: 'corner_kick', result: 'restart'
+    };
+    this.generateGameEvent('corner', team.name, taker.name);
+    this.lastTouchTeam = team === this.team1 ? 'team1' : 'team2';
+  }
+
+  private performGoalKick(defTeam: 'team1'|'team2', side: 'left'|'right'): void {
+    const gs = this.gameState$.value;
+    const team = defTeam === 'team1' ? this.team1! : this.team2!;
+    const fieldW = environment.gameSettings.fieldWidth;
+    const fieldH = environment.gameSettings.fieldHeight;
+    const x = side === 'left' ? 60 : fieldW - 60;
+    const y = fieldH / 2 + (Math.random() - 0.5) * 80;
+    const keeper = team.players.find(p => p.role === 'goalkeeper') || team.players[0];
+    this.gameState$.next({ ...gs, ball: { x, y, vx: 0, vy: 0 }, currentBallOwner: keeper.id });
+    (this as any)._eventExtra = {
+      startX: x, startY: y, endX: x, endY: y, role: keeper.role, subtype: 'goal_kick', result: 'restart'
+    };
+    this.generateGameEvent('goal_kick', team.name, keeper.name);
+    this.lastTouchTeam = defTeam;
   }
 
   // Throw-in handler (saque de banda)
