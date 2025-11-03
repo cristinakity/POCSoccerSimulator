@@ -13,6 +13,9 @@ export interface Player {
   position: { x: number; y: number };
   role: 'goalkeeper' | 'defender' | 'midfielder' | 'forward';
   abilities?: PlayerAbilities; // optional until generated
+  facing?: number; // radians, 0 points to the right
+  mode?: 'idle' | 'dash' | 'turn' | 'kick';
+  actionUntil?: number; // timestamp ms when current action ends
 }
 
 export interface PlayerAbilities {
@@ -43,6 +46,9 @@ export interface GameEvent {
   subtype?: string; // finer event subtype e.g. short_pass, long_pass, cross, through_ball
   zoneStart?: string; // zone label for start (defensive_third, middle_third, attacking_third, left_flank, right_flank, central)
   zoneEnd?: string;   // zone label for end
+  xg?: number;        // expected goal value (0-1) for shot-related events
+  pressure?: number;  // distance of nearest opponent at action time
+  facingError?: number; // angular difference between player facing and action direction (radians)
 }
 
 @Injectable({

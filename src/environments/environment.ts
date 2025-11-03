@@ -23,6 +23,10 @@ export const environment = {
     },
     playerSize: 12,
     ballSize: 8,
-    experimentalBounce: false // when true, ball will bounce off boundaries instead of triggering throw-ins (non-official soccer)
+    experimentalBounce: false, // when true, ball will bounce off boundaries instead of triggering throw-ins (non-official soccer)
+    decisionIntervalMs: 110, // AI decision cadence (ms)
+    randomSeed: null as number | null, // set to a number for deterministic simulation
+    ballDecayFree: 0.985, // decay applied each frame when ball free (overrides frictionFree if set)
+    ballDecayPossessed: 0.994 // decay when dribbling (matches frictionPossessed by default)
   }
 };
