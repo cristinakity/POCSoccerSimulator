@@ -1,8 +1,11 @@
-import { Component, Input, OnInit, OnDestroy } from '@angular/core';
+import { Component, Input, OnInit, OnDestroy, OnChanges, SimpleChanges } from '@angular/core';
+import { CommonModule } from '@angular/common';
 import { GameEvent } from '../../services/team.service';
 
 @Component({
   selector: 'app-game-log',
+  standalone: true,
+  imports: [CommonModule],
   template: `
     <div class="game-log">
       <h4>Game Events</h4>
@@ -62,7 +65,7 @@ import { GameEvent } from '../../services/team.service';
     }
   `]
 })
-export class GameLogComponent implements OnInit, OnDestroy {
+export class GameLogComponent implements OnInit, OnDestroy, OnChanges {
   @Input() events: GameEvent[] = [];
   
   private lastEventCount = 0;
@@ -75,7 +78,7 @@ export class GameLogComponent implements OnInit, OnDestroy {
     // Cleanup if needed
   }
 
-  ngOnChanges(): void {
+  ngOnChanges(changes: SimpleChanges): void {
     // Auto-scroll to bottom when new events are added
     if (this.events.length > this.lastEventCount) {
       this.lastEventCount = this.events.length;

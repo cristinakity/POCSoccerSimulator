@@ -1,5 +1,9 @@
-import { platformBrowserDynamic } from '@angular/platform-browser-dynamic';
-import { AppModule } from './app/app.module';
+import { bootstrapApplication } from '@angular/platform-browser';
+import { importProvidersFrom } from '@angular/core';
+import { FormsModule } from '@angular/forms';
+import { AppComponent } from './app/app.component';
 
-platformBrowserDynamic().bootstrapModule(AppModule)
-  .catch((err: unknown) => console.error(err));
+// Standalone bootstrap: AppComponent is now standalone and imports GameSimulatorComponent.
+bootstrapApplication(AppComponent, {
+  providers: [importProvidersFrom(FormsModule)]
+}).catch(err => console.error(err));

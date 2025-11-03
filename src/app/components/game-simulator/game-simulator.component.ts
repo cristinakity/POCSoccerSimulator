@@ -3,9 +3,15 @@ import { Subscription } from 'rxjs';
 import { TeamService, Team } from '../../services/team.service';
 import { GameEngineService, GameState } from '../../services/game-engine.service';
 import { environment } from 'src/environments/environment';
+import { SoccerFieldComponent } from '../soccer-field/soccer-field.component';
+import { GameLogComponent } from '../game-log/game-log.component';
+import { FormsModule } from '@angular/forms';
+import { CommonModule } from '@angular/common';
 
 @Component({
   selector: 'app-game-simulator',
+  standalone: true,
+  imports: [SoccerFieldComponent, GameLogComponent, FormsModule, CommonModule],
   template: `
     <div class="controls">
       <div class="team-selector">

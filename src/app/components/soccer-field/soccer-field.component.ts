@@ -5,6 +5,7 @@ import { environment } from '../../../environments/environment';
 
 @Component({
   selector: 'app-soccer-field',
+  standalone: true,
   template: `
     <canvas 
       #gameCanvas 
