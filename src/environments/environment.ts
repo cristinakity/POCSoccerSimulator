@@ -22,6 +22,7 @@ export const environment = {
       frictionFree: 0.988    // ball slows a bit slower than before
     },
     playerSize: 12,
-    ballSize: 8
+    ballSize: 8,
+    experimentalBounce: false // when true, ball will bounce off boundaries instead of triggering throw-ins (non-official soccer)
   }
 };

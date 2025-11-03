@@ -22,6 +22,7 @@ export interface PlayerAbilities {
   stamina: number;     // 0-100 (current stamina)
   maxStamina: number;  // 60-100 (ceiling)
   speedFactor: number; // 0.8 - 1.2 multiplier over base speed
+  agility: number;     // 0-100 – responsiveness & lateral quickness
 }
 
 export interface GameEvent {
@@ -165,13 +166,15 @@ export class TeamService {
       const shotPower = Math.min(100, Math.max(35, baseSkill() + powerVariance));
       const accuracy = Math.min(100, Math.max(40, baseSkill() + (role === 'forward' ? 5 : 0)));
       const maxStamina = Math.floor(60 + Math.random() * 40); // 60-100
+      const agility = Math.min(100, Math.max(40, baseSkill() + (role === 'midfielder' ? 5 : role === 'forward' ? 8 : 0)));
       const abilities: PlayerAbilities = {
         passPower,
         shotPower,
         accuracy,
         stamina: maxStamina,
         maxStamina,
-        speedFactor: 1 + speedVariance + (Math.random() - 0.5) * 0.1 // small randomness
+        speedFactor: 1 + speedVariance + (Math.random() - 0.5) * 0.1,
+        agility
       };
       return {
         id: `player_${index}`,

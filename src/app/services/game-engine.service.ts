@@ -145,7 +145,8 @@ export class GameEngineService {
       { name: '4-3-3_wide', defX: 0.20, midX: 0.45, fwdX: 0.70, defSpread: 0.48, midSpread: 0.58, fwdSpread: 0.70 },
       { name: '4-4-2_shape', defX: 0.22, midX: 0.48, fwdX: 0.72, defSpread: 0.46, midSpread: 0.60, fwdSpread: 0.40 },
       { name: '3-4-3_press', defX: 0.26, midX: 0.50, fwdX: 0.74, defSpread: 0.55, midSpread: 0.62, fwdSpread: 0.58 },
-      { name: '5-3-2_block', defX: 0.16, midX: 0.40, fwdX: 0.66, defSpread: 0.50, midSpread: 0.46, fwdSpread: 0.30 }
+      { name: '5-3-2_block', defX: 0.16, midX: 0.40, fwdX: 0.66, defSpread: 0.50, midSpread: 0.46, fwdSpread: 0.30 },
+      { name: '3-5-2_compact', defX: 0.24, midX: 0.50, fwdX: 0.70, defSpread: 0.50, midSpread: 0.65, fwdSpread: 0.38 }
     ];
     const pickFormation = () => formations[Math.floor(Math.random()*formations.length)];
     const placeTeam = (team: Team, isLeft: boolean) => {
@@ -374,7 +375,11 @@ export class GameEngineService {
     const chasers = sorted.slice(0,4);
     everyone.forEach(player => {
       if (player.abilities) {
-        const decay = 0.002 * dtNorm * (player.role === 'midfielder' ? 1.2 : 1) * (player.role === 'forward' ? 1.1 : 1);
+        // Stamina decay scaled with role & recent chase intensity; agility reduces effective decay slightly
+        const chaseIntensity = Math.min(1, Math.hypot(ballPos.vx, ballPos.vy) / environment.gameSettings.speed.maxBallSpeed);
+        const agilityFactor = player.abilities.agility ? (0.9 + (100 - player.abilities.agility) / 100 * 0.15) : 1;
+        const decayBase = 0.002 * dtNorm * (player.role === 'midfielder' ? 1.15 : player.role === 'forward' ? 1.10 : 1);
+        const decay = decayBase * (1 + 0.4 * chaseIntensity) * agilityFactor;
         player.abilities.stamina = Math.max(0, player.abilities.stamina - decay);
       }
       if (player.role === 'goalkeeper') {
@@ -409,16 +414,17 @@ export class GameEngineService {
       const dx = ballPos.x - player.position.x;
       const dy = ballPos.y - player.position.y;
       const distance = Math.hypot(dx, dy);
-      const staminaFactor = player.abilities ? (0.5 + 0.5 * (player.abilities.stamina / player.abilities.maxStamina)) : 1;
-      const speedFactor = player.abilities ? player.abilities.speedFactor : 1;
+  const staminaFactor = player.abilities ? (0.5 + 0.5 * (player.abilities.stamina / player.abilities.maxStamina)) : 1;
+  const speedFactor = player.abilities ? player.abilities.speedFactor : 1;
+  const agilityMod = player.abilities ? (0.85 + player.abilities.agility / 100 * 0.3) : 1; // agility increases responsiveness
       // Enhanced defensive logic: if assigned presser / lane blocker give bespoke movement multipliers
       const isPrimaryPresser = primaryPresser === player;
       const isSecondaryBlocker = secondaryBlocker === player;
       const chaseMultiplier = isPrimaryPresser ? (1.35 + speedCfg.chaseExtra) : isSecondaryBlocker ? 0.95 : (isChasing ? (1 + speedCfg.chaseExtra) : 0.3);
       const chaseFactor = chaseMultiplier * baseMove * speedFactor * staminaFactor;
       const formationFactor = 0.06 * baseMove;
-      let jitterX = (Math.random() - 0.5) * 0.08 * baseMove;
-      let jitterY = (Math.random() - 0.5) * 0.08 * baseMove;
+  let jitterX = (Math.random() - 0.5) * 0.08 * baseMove * agilityMod;
+  let jitterY = (Math.random() - 0.5) * 0.08 * baseMove * agilityMod;
       // If secondary blocker: move toward an anticipated passing lane (ahead of owner on a slight offset)
       if (isSecondaryBlocker && ballOwner) {
         const dir = ownerTeam.includes(ballOwner) ? (team1Players.includes(ballOwner) ? 1 : -1) : 1; // fallback
