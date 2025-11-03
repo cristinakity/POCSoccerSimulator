@@ -199,6 +199,20 @@ export class GameEngineService {
     };
     placeTeam(this.team1, true);
     placeTeam(this.team2, false);
+    // Kickoff law compliance: ensure all players (except future kicker) start fully in their own half.
+    const mid = fieldW / 2;
+    this.team1.players.forEach(p => {
+      if (p.position.x > mid - 12) {
+        p.position.x = mid - 12;
+        if ((p as any).basePosition) (p as any).basePosition.x = p.position.x;
+      }
+    });
+    this.team2.players.forEach(p => {
+      if (p.position.x < mid + 12) {
+        p.position.x = mid + 12;
+        if ((p as any).basePosition) (p as any).basePosition.x = p.position.x;
+      }
+    });
   }
 
   private startGameLoop(): void {
@@ -232,7 +246,8 @@ export class GameEngineService {
         const newTime = gs.timeRemaining - 1;
         // Halftime trigger (simple: midpoint of configured duration if > 60 real minutes target (i.e., 90 sim seconds))
         const halfMark = Math.floor(this.gameDuration / 2);
-        if (gs.phase === 'inplay' && newTime === halfMark) {
+        // Only trigger halftime for matches representing two halves (>= 60 simulated seconds)
+        if (this.gameDuration >= 60 && gs.phase === 'inplay' && newTime === halfMark) {
           this.enterHalftime();
         } else {
           this.gameState$.next({ ...gs, timeRemaining: newTime });
