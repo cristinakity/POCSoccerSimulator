@@ -242,6 +242,15 @@ export class GameEngineService {
       const friction = speedCfg.frictionFree;
       vx *= friction; vy *= friction;
       if (Math.abs(vx) < 0.05) vx = 0; if (Math.abs(vy) < 0.05) vy = 0;
+      // Out-of-bounds detection -> trigger throw-in restart ("saque de banda")
+      const fieldW = environment.gameSettings.fieldWidth;
+      const fieldH = environment.gameSettings.fieldHeight;
+      const touchMargin = 5; // small margin beyond which we consider ball out
+      if (y < touchMargin || y > fieldH - touchMargin) {
+        this.handleThrowIn(x, y);
+        return; // restart performed
+      }
+      // (Future: goal line exits x < 0 or x > fieldW could become corner/goal_kick events)
     }
     this.gameState$.next({ ...state, ball: { x, y, vx, vy } });
   }
@@ -615,7 +624,9 @@ export class GameEngineService {
         if (pool.length > 0) {
           const offender = pool[Math.floor(Math.random() * pool.length)];
           const offenderTeam = this.team1.players.includes(offender) ? this.team1 : this.team2;
-          this.generateGameEvent('offside', offenderTeam.name, offender.name);
+            this.generateGameEvent('offside', offenderTeam.name, offender.name);
+            // After offside, perform restart so ball re-enters play (simple throw-in style for now)
+            this.handleOffsideRestart(offender, offenderTeam);
         }
       }
     }
@@ -720,5 +731,65 @@ export class GameEngineService {
     };
 
     return events[eventType as keyof typeof events] || `${playerName} is involved in the action!`;
+  }
+
+  // Throw-in handler (saque de banda)
+  private handleThrowIn(x: number, y: number): void {
+    if (!this.team1 || !this.team2) return;
+    const gs = this.gameState$.value;
+    const fieldH = environment.gameSettings.fieldHeight;
+    const fieldW = environment.gameSettings.fieldWidth;
+    const inFieldY = y < fieldH / 2 ? 30 : fieldH - 30;
+    const inFieldX = Math.max(40, Math.min(fieldW - 40, x));
+    const allPlayers = [...this.team1.players, ...this.team2.players];
+    const lastId = this.recentOwners.length ? this.recentOwners[this.recentOwners.length - 1] : null;
+    const lastPlayer = lastId ? allPlayers.find(p => p.id === lastId) : null;
+    const throwTeam = lastPlayer ? (this.team1.players.includes(lastPlayer) ? this.team2! : this.team1!) : this.team1!;
+    // Choose nearest player from throwTeam to restart
+    let taker = throwTeam.players[0];
+    let bestD = Infinity;
+    for (const p of throwTeam.players) {
+      const d = Math.hypot(p.position.x - inFieldX, p.position.y - inFieldY);
+      if (d < bestD) { bestD = d; taker = p; }
+    }
+    this.gameState$.next({ ...gs, ball: { x: inFieldX, y: inFieldY, vx: 0, vy: 0 }, currentBallOwner: taker.id });
+    (this as any)._eventExtra = {
+      startX: inFieldX,
+      startY: inFieldY,
+      endX: inFieldX,
+      endY: inFieldY,
+      role: taker.role,
+      subtype: 'throw_in',
+      result: 'restart'
+    };
+    this.generateGameEvent('throw_in', throwTeam.name, taker.name);
+  }
+
+  private handleOffsideRestart(offender: Player, offenderTeam: Team): void {
+    if (!this.team1 || !this.team2) return;
+    const defendingTeam = this.team1.players.includes(offender) ? this.team2! : this.team1!;
+    const attackDir = this.team1.players.includes(offender) ? 1 : -1;
+    const restartX = Math.max(40, Math.min(environment.gameSettings.fieldWidth - 40, offender.position.x - 30 * attackDir));
+    const restartY = offender.position.y;
+    // Pick nearest defender to restart
+    let taker = defendingTeam.players[0];
+    let bestD = Infinity;
+    for (const p of defendingTeam.players) {
+      const d = Math.hypot(p.position.x - restartX, p.position.y - restartY);
+      if (d < bestD) { bestD = d; taker = p; }
+    }
+    const gs = this.gameState$.value;
+    this.gameState$.next({ ...gs, ball: { x: restartX, y: restartY, vx: 0, vy: 0 }, currentBallOwner: taker.id });
+    (this as any)._eventExtra = {
+      startX: restartX,
+      startY: restartY,
+      endX: restartX,
+      endY: restartY,
+      role: taker.role,
+      subtype: 'offside_restart',
+      result: 'restart'
+    };
+    // Use throw_in event label per user request for visible restart (could be free_kick in real rules)
+    this.generateGameEvent('throw_in', defendingTeam.name, taker.name);
   }
 }
