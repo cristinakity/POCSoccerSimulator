@@ -237,7 +237,13 @@ export class GameEngineService {
 
     if (gs.currentBallOwner) {
       const owner = this.findPlayer(gs.currentBallOwner);
-      if (owner) { x = owner.position.x; y = owner.position.y; vx = 0; vy = 0; }
+      if (owner) { 
+        x = owner.position.x; 
+        y = owner.position.y; 
+        vx = 0; 
+        vy = 0; 
+      }
+      this.gameState$.next({ ...gs, ball: { x, y, vx, vy } });
     } else {
       const dtSec = delta / 1000;
       x += vx * dtSec; y += vy * dtSec;
@@ -284,8 +290,8 @@ export class GameEngineService {
         this.restartGraceUntil = Date.now() + 1200;
         return;
       }
+      this.gameState$.next({ ...gs, ball: { x, y, vx, vy } });
     }
-    this.gameState$.next({ ...gs, ball: { x, y, vx, vy } });
   }
 
   private updatePlayerPositions(delta: number): void {
@@ -568,13 +574,27 @@ export class GameEngineService {
     const team = this.isTeam1(owner) ? this.team1! : this.team2!;
     const mates = team.players.filter(p => p.id !== owner.id);
     if (!mates.length) return;
-    // Shooting chance when close
+    
+    // Shooting chance when in attacking position
     const goalX = dir === 1 ? this.W - 6 : 6;
     const distToGoal = Math.abs(goalX - owner.position.x);
-    if (distToGoal < 140 && Math.abs(owner.position.y - this.H / 2) < 160 && this.rand() < 0.04) {
-      this.takeShot(owner, goalX, this.H / 2);
+    const centerY = this.H / 2;
+    const yOffset = Math.abs(owner.position.y - centerY);
+    
+    // More aggressive shooting: closer = higher probability, better angles = higher probability
+    let shootChance = 0;
+    if (distToGoal < 200 && yOffset < 180) {
+      // Base chance increases as player gets closer and more central
+      shootChance = 0.08 + (200 - distToGoal) / 2000 + (180 - yOffset) / 3600;
+      // Forwards shoot more often
+      if (owner.role === 'forward') shootChance *= 1.5;
+    }
+    
+    if (shootChance > 0 && this.rand() < shootChance) {
+      this.takeShot(owner, goalX, centerY);
       return;
     }
+    
     // Pass decision respecting cooldown
     const now = Date.now();
     if (now - this.lastPassTime < this.passCooldownMs) return;
