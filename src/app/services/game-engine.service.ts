@@ -271,10 +271,25 @@ export class GameEngineService {
       ball.vy = 0;
     }
 
-    // Add small randomness when free (no owner)
-    if (!currentState.currentBallOwner) {
-      ball.vx += (Math.random() - 0.5) * 0.15 * dt;
-      ball.vy += (Math.random() - 0.5) * 0.15 * dt;
+    // Remove random drift: ball only moves when kicked; if owned, anchor to owner's feet
+    if (currentState.currentBallOwner) {
+      const owner = [...(this.team1?.players||[]), ...(this.team2?.players||[])]
+        .find(p => p.id === currentState.currentBallOwner);
+      if (owner) {
+        // Lightly position ball slightly ahead of player (direction based on side)
+        const isLeftTeam = this.team1?.players.includes(owner) ?? false;
+        const offsetX = isLeftTeam ? 10 : -10;
+        ball.x = owner.position.x + offsetX;
+        ball.y = owner.position.y;
+        // Ball stays with player until a kick (pass/shot) sets velocity & clears owner
+        ball.vx = 0;
+        ball.vy = 0;
+      }
+    } else {
+      // If free and velocity is very low, stop completely
+      if (Math.hypot(ball.vx, ball.vy) < 0.05) {
+        ball.vx = 0; ball.vy = 0;
+      }
     }
 
     // Limit speed using config
@@ -523,7 +538,8 @@ export class GameEngineService {
         const vxShot = (dxShot / dShot) * shotSpeed;
         const vyShot = (dyShot / dShot) * shotSpeed;
         const updatedBall = { ...ball, vx: vxShot, vy: vyShot };
-        this.gameState$.next({ ...currentState, ball: updatedBall, currentBallOwner: ownerPlayer.id });
+        // Release ownership so ball travels
+        this.gameState$.next({ ...currentState, ball: updatedBall, currentBallOwner: null });
         this.lastPassTime = now; // reuse cooldown
         this.generateGameEvent('shot', (sameTeam === this.team1.players ? this.team1.name : this.team2!.name), ownerPlayer.name);
         return;
@@ -560,7 +576,8 @@ export class GameEngineService {
         const vx = (ndx / ndist) * passSpeed;
         const vy = (ndy / ndist) * passSpeed;
         const updated = { ...currentState.ball, vx, vy };
-        this.gameState$.next({ ...currentState, ball: updated, currentBallOwner: ownerPlayer.id });
+        // Release ownership on pass so receiving player must acquire when close
+        this.gameState$.next({ ...currentState, ball: updated, currentBallOwner: null });
         this.lastPassTime = now;
         this.generateGameEvent('pass', (sameTeam === this.team1.players ? this.team1.name : this.team2!.name), `${ownerPlayer.name}→${target.name}`);
         return;
