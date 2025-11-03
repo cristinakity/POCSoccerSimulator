@@ -124,7 +124,8 @@ export class GameSimulatorComponent implements OnInit, OnDestroy {
     score: { team1: 0, team2: 0 },
     ball: { x: 450, y: 300, vx: 0, vy: 0 },
     events: [],
-    currentBallOwner: null
+    currentBallOwner: null,
+    phase: 'kickoff'
   };
 
   private subscriptions: Subscription[] = [];
