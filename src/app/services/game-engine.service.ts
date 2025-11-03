@@ -293,27 +293,83 @@ export class GameEngineService {
     const ball = gs.ball;
     const allPlayers = [...this.team1!.players, ...this.team2!.players];
     const baseSpeed = environment.gameSettings.speed.playerBase * (delta / 16.67);
-    allPlayers.forEach((player) => {
-      const dx = ball.x - player.position.x;
-      const dy = ball.y - player.position.y;
-      const distanceToBall = Math.hypot(dx, dy) || 1;
-      let moveFactor = distanceToBall < 30 ? 1.4 : 0.45;
-      if (gs.currentBallOwner === player.id) {
-        // Dribble advance
-        const dir = this.isTeam1(player) ? 1 : -1;
-        player.position.x += dir * baseSpeed * 0.6;
-        player.position.y += (this.rand() - 0.5) * baseSpeed * 0.5;
-        moveFactor = 0; // skip chase
+    const ballOwner = gs.currentBallOwner ? this.findPlayer(gs.currentBallOwner) : null;
+    const ownerIsTeam1 = ballOwner ? this.isTeam1(ballOwner) : null;
+    const attackingTeam = ownerIsTeam1 == null ? null : (ownerIsTeam1 ? this.team1! : this.team2!);
+    const defendingTeam = ownerIsTeam1 == null ? null : (ownerIsTeam1 ? this.team2! : this.team1!);
+
+    // Limited pressers from defending side
+    let pressers: Player[] = [];
+    if (defendingTeam) {
+      pressers = defendingTeam.players.filter(p => p.role !== 'goalkeeper')
+        .map(p => ({ p, d: Math.hypot(p.position.x - ball.x, p.position.y - ball.y) }))
+        .sort((a, b) => a.d - b.d)
+        .slice(0, 2)
+        .map(o => o.p);
+    }
+
+    // Support runner (closest non-owner attacker)
+    let support: Player | null = null;
+    if (attackingTeam && ballOwner) {
+      support = attackingTeam.players.filter(p => p.id !== ballOwner.id && p.role !== 'goalkeeper')
+        .sort((a, b) => Math.hypot(a.position.x - ball.x, a.position.y - ball.y) - Math.hypot(b.position.x - ball.x, b.position.y - ball.y))[0] || null;
+    }
+
+    allPlayers.forEach(p => {
+      const isOwner = !!ballOwner && p.id === ballOwner.id;
+      const dir = this.isTeam1(p) ? 1 : -1;
+      const basePos = (p as any).basePosition || { x: p.position.x, y: p.position.y };
+      if (isOwner) {
+        const staminaFactor = p.abilities?.stamina && p.abilities?.maxStamina ? (0.5 + p.abilities.stamina / p.abilities.maxStamina) : 1;
+        const speedFactor = (p.abilities?.speedFactor ?? 1) * staminaFactor;
+        p.position.x += dir * baseSpeed * 0.65 * speedFactor;
+        p.position.y += (this.rand() - 0.5) * baseSpeed * 0.45 * (p.abilities?.agility ?? 60) / 100;
+      } else if (pressers.includes(p)) {
+        const dx = ball.x - p.position.x; const dy = ball.y - p.position.y; const d = Math.hypot(dx, dy) || 1;
+        const pressSpeed = baseSpeed * 1.25 * (p.abilities?.speedFactor ?? 1);
+        p.position.x += (dx / d) * pressSpeed; p.position.y += (dy / d) * pressSpeed;
+      } else if (support && p.id === support.id) {
+        const offsetX = (ball.x - basePos.x) * 0.30;
+        const offsetY = (ball.y - basePos.y) * 0.40 + (this.rand() - 0.5) * 20;
+        const targetX = basePos.x + offsetX; const targetY = basePos.y + offsetY;
+        const dx = targetX - p.position.x; const dy = targetY - p.position.y; const d = Math.hypot(dx, dy) || 1;
+        p.position.x += (dx / d) * baseSpeed * 0.9; p.position.y += (dy / d) * baseSpeed * 0.9;
+      } else {
+        let shiftX = (ball.x - this.W / 2) * 0.05 * dir;
+        let shiftY = (ball.y - this.H / 2) * 0.08;
+        if (ballOwner) {
+          const sameSide = ownerIsTeam1 === this.isTeam1(p);
+          if (sameSide) {
+            const behindBall = (p.position.x * dir) < (ball.x * dir - 60);
+            if (behindBall) shiftX += 20 * dir;
+          } else {
+            const aheadBall = (p.position.x * dir) > (ball.x * dir + 30);
+            if (aheadBall) shiftX -= 15 * dir;
+          }
+        }
+        const targetX = Math.max(0, Math.min(this.W, basePos.x + shiftX));
+        const targetY = Math.max(0, Math.min(this.H, basePos.y + shiftY));
+        const dx = targetX - p.position.x; const dy = targetY - p.position.y; const d = Math.hypot(dx, dy) || 1;
+        p.position.x += (dx / d) * baseSpeed * 0.6; p.position.y += (dy / d) * baseSpeed * 0.6;
       }
-      if (moveFactor > 0) {
-        const stepX = (dx / distanceToBall) * baseSpeed * moveFactor;
-        const stepY = (dy / distanceToBall) * baseSpeed * moveFactor;
-        player.position.x += stepX;
-        player.position.y += stepY;
-      }
-      player.position.x = Math.max(0, Math.min(this.W, player.position.x));
-      player.position.y = Math.max(0, Math.min(this.H, player.position.y));
+      p.position.x = Math.max(0, Math.min(this.W, p.position.x));
+      p.position.y = Math.max(0, Math.min(this.H, p.position.y));
     });
+
+    // Separation pass
+    for (let i = 0; i < allPlayers.length; i++) {
+      for (let j = i + 1; j < allPlayers.length; j++) {
+        const a = allPlayers[i]; const b = allPlayers[j];
+        let dx = b.position.x - a.position.x; let dy = b.position.y - a.position.y; const dist = Math.hypot(dx, dy);
+        if (dist > 0 && dist < 14) {
+          const push = (14 - dist) * 0.5; dx /= dist; dy /= dist;
+          a.position.x -= dx * push; a.position.y -= dy * push;
+          b.position.x += dx * push; b.position.y += dy * push;
+          a.position.x = Math.max(0, Math.min(this.W, a.position.x)); a.position.y = Math.max(0, Math.min(this.H, a.position.y));
+          b.position.x = Math.max(0, Math.min(this.W, b.position.x)); b.position.y = Math.max(0, Math.min(this.H, b.position.y));
+        }
+      }
+    }
   }
 
   // -------------------------------------------------
@@ -459,6 +515,7 @@ export class GameEngineService {
     };
     placeTeam(this.team1, true);
     placeTeam(this.team2, false);
+    [...this.team1.players, ...this.team2.players].forEach(p => { (p as any).basePosition = { x: p.position.x, y: p.position.y }; });
   }
 
   /** Expose current mutable team references (used by UI if needed) */
@@ -702,6 +759,7 @@ export class GameEngineService {
   private mirrorSides(): void {
     [...(this.team1?.players || []), ...(this.team2?.players || [])].forEach(p => {
       p.position.x = this.W - p.position.x;
+      if ((p as any).basePosition) (p as any).basePosition.x = this.W - (p as any).basePosition.x;
     });
   }
 

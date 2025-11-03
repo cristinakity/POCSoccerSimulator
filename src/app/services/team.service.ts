@@ -11,6 +11,8 @@ export interface Player {
   id: string;
   name: string;
   position: { x: number; y: number };
+  // Base formation anchor retained to keep team shape; movement logic oscillates around this
+  basePosition?: { x: number; y: number };
   role: 'goalkeeper' | 'defender' | 'midfielder' | 'forward';
   abilities?: PlayerAbilities; // optional until generated
   facing?: number; // radians, 0 points to the right
