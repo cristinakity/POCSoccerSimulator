@@ -32,6 +32,16 @@ export interface GameEvent {
   description: string;
   displayTime?: string; // scaled match clock (e.g., 12:34)
   realMinute?: number;  // corresponding real 45-min match minute (0-45)
+  // Extended analytics fields
+  startX?: number; // starting ball X coordinate (field units)
+  startY?: number; // starting ball Y coordinate
+  endX?: number;   // ending / intended target X
+  endY?: number;   // ending / intended target Y
+  result?: string; // outcome classification (complete, intercepted, goal, saved, blocked, attempt)
+  role?: string;   // role of acting player at event time
+  subtype?: string; // finer event subtype e.g. short_pass, long_pass, cross, through_ball
+  zoneStart?: string; // zone label for start (defensive_third, middle_third, attacking_third, left_flank, right_flank, central)
+  zoneEnd?: string;   // zone label for end
 }
 
 @Injectable({

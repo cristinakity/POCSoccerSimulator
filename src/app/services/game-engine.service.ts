@@ -470,6 +470,16 @@ export class GameEngineService {
           const dx = targetX - owner.position.x; const dy = targetY - owner.position.y; const dist = Math.hypot(dx, dy) || 1;
           const vx = (dx / dist) * speedCfg.passSpeed * 1.25; const vy = (dy / dist) * speedCfg.passSpeed * 1.25;
           this.gameState$.next({ ...state, ball: { ...ball, vx, vy }, currentBallOwner: null });
+          // Attach extended metadata for forced long pass
+          (this as any)._eventExtra = {
+            startX: owner.position.x,
+            startY: owner.position.y,
+            endX: targetX,
+            endY: targetY,
+            role: owner.role,
+            subtype: 'forced_long_pass',
+            result: 'complete'
+          };
           this.lastPassTime = now; this.generateGameEvent('pass', (sameTeam === this.team1.players ? this.team1.name : this.team2!.name), `${owner.name}⇢Long`); this.possessionStartTime = now + 400; return;
         }
       }
@@ -490,6 +500,16 @@ export class GameEngineService {
           const shotSpeed = speedCfg.shotSpeed * powerFactor * staminaFactor;
           const vxShot = (dxShot / dShot) * shotSpeed; const vyShot = (dyShot / dShot) * shotSpeed;
           this.gameState$.next({ ...state, ball: { ...ball, vx: vxShot, vy: vyShot }, currentBallOwner: null });
+          // Shot attempt metadata
+          (this as any)._eventExtra = {
+            startX: ball.x,
+            startY: ball.y,
+            endX: goalX,
+            endY: targetY,
+            role: owner.role,
+            subtype: 'shot_attempt',
+            result: 'attempt'
+          };
           this.lastPassTime = now; this.generateGameEvent('shot', (this.team1.players.includes(owner) ? this.team1.name : this.team2!.name), owner.name); this.possessionStartTime = now; return;
         }
         const teammates = (this.team1.players.includes(owner) ? this.team1.players : this.team2.players).filter(p => p.id !== owner!.id);
@@ -523,6 +543,17 @@ export class GameEngineService {
             this.gameState$.next({ ...state, ball: { ...ball, vx, vy }, currentBallOwner: null });
             this.lastPassTime = now;
             const dirSymbol = (chosen === forward) ? '→' : (chosen === lateral) ? '↔' : '↩';
+            // Pass metadata
+            const passSubtype = (chosen === forward) ? 'forward_pass' : (chosen === lateral) ? 'lateral_pass' : 'backward_pass';
+            (this as any)._eventExtra = {
+              startX: owner!.position.x,
+              startY: owner!.position.y,
+              endX: target.position.x,
+              endY: target.position.y,
+              role: owner!.role,
+              subtype: passSubtype,
+              result: 'complete'
+            };
             this.generateGameEvent('pass', (this.team1.players.includes(owner) ? this.team1.name : this.team2!.name), `${owner!.name}${dirSymbol}${target.name}`);
             const forwardDelta = dirSign * (target.position.x - owner!.position.x);
             if (forwardDelta > 14) this.consecutiveNonAdvancingPasses = 0; else this.consecutiveNonAdvancingPasses++;
@@ -619,6 +650,21 @@ export class GameEngineService {
      const displaySecs = Math.floor((realMinuteFloat - displayMins) * 60);
      const displayTime = `${displayMins.toString().padStart(2,'0')}:${displaySecs.toString().padStart(2,'0')}`;
 
+    // Allow extended metadata via a temporary stash object placed on (this as any)._eventExtra before call
+    const extra = (this as any)._eventExtra || {};
+    delete (this as any)._eventExtra;
+    const classifyZone = (x: number, y: number): string => {
+      const fw = environment.gameSettings.fieldWidth;
+      const fh = environment.gameSettings.fieldHeight;
+      const thirdW = fw / 3;
+      let zone: string = 'middle_third';
+      if (x < thirdW) zone = 'defensive_third'; else if (x > 2 * thirdW) zone = 'attacking_third';
+      const flankMargin = fh * 0.20;
+      if (y < flankMargin) zone += '_top_flank'; else if (y > fh - flankMargin) zone += '_bottom_flank'; else zone += '_central';
+      return zone;
+    };
+    const zoneStart = (extra.startX !== undefined && extra.startY !== undefined) ? classifyZone(extra.startX, extra.startY) : undefined;
+    const zoneEnd = (extra.endX !== undefined && extra.endY !== undefined) ? classifyZone(extra.endX, extra.endY) : undefined;
     const event: GameEvent = {
       time: elapsedTime,
       type: type as any,
@@ -626,7 +672,16 @@ export class GameEngineService {
       player: playerName,
       description: this.getEventDescription(type, playerName, teamName),
       displayTime,
-      realMinute
+      realMinute,
+      startX: extra.startX,
+      startY: extra.startY,
+      endX: extra.endX,
+      endY: extra.endY,
+      result: extra.result,
+      role: extra.role,
+      subtype: extra.subtype,
+      zoneStart,
+      zoneEnd
     };
 
     const newEvents = [...currentState.events, event];
