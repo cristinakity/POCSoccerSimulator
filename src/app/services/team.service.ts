@@ -26,7 +26,7 @@ export interface PlayerAbilities {
 
 export interface GameEvent {
   time: number;
-  type: 'goal' | 'foul' | 'substitution' | 'corner' | 'offside' | 'yellow_card' | 'red_card' | 'pass' | 'shot' | 'coin_toss' | 'kickoff';
+  type: 'goal' | 'foul' | 'substitution' | 'corner' | 'offside' | 'yellow_card' | 'red_card' | 'pass' | 'shot' | 'coin_toss' | 'kickoff' | 'throw_in' | 'tackle' | 'interception' | 'clearance' | 'goal_kick' | 'save';
   team: string;
   player: string;
   description: string;
@@ -77,7 +77,9 @@ export class TeamService {
 
   generateRandomTeams(): Team[] {
     const shuffledNames = [...this.funnyTeamNames].sort(() => Math.random() - 0.5);
-    const shuffledColors = [...this.teamColors].sort(() => Math.random() - 0.5);
+    let shuffledColors = [...this.teamColors].sort(() => Math.random() - 0.5);
+    // Ensure first two colors are highly contrasting for visual clarity between teams
+    shuffledColors = this.ensureContrastingFirstTwo(shuffledColors);
     
     const teams: Team[] = [];
     
@@ -91,6 +93,59 @@ export class TeamService {
     }
     
     return teams;
+  }
+
+  // --- Color contrast utilities to guarantee distinguishable team kits ---
+  private ensureContrastingFirstTwo(colors: string[]): string[] {
+    if (colors.length < 2) return colors;
+    const [first, second] = colors;
+    const ratio = this.contrastRatio(first, second);
+    // Desired minimum contrast ratio (WCAG AA text is 4.5; here we pick 3 for broad color distinction)
+    if (ratio >= 3) return colors;
+    // Find alternative color with maximal contrast to first
+    let bestColor = second;
+    let bestRatio = ratio;
+    for (let i = 2; i < colors.length; i++) {
+      const c = colors[i];
+      const r = this.contrastRatio(first, c);
+      if (r > bestRatio) { bestRatio = r; bestColor = c; }
+      if (r >= 4.5) { bestColor = c; break; } // good enough, early exit
+    }
+    // Swap chosen high-contrast color into second position
+    const idx = colors.indexOf(bestColor);
+    if (idx > 1) {
+      const newColors = [...colors];
+      [newColors[1], newColors[idx]] = [newColors[idx], newColors[1]];
+      return newColors;
+    }
+    return colors;
+  }
+
+  private contrastRatio(a: string, b: string): number {
+    const lumA = this.relativeLuminance(a);
+    const lumB = this.relativeLuminance(b);
+    const L1 = Math.max(lumA, lumB);
+    const L2 = Math.min(lumA, lumB);
+    return (L1 + 0.05) / (L2 + 0.05);
+  }
+
+  private relativeLuminance(hex: string): number {
+    const rgb = this.hexToRgb(hex);
+    const srgb = [rgb.r, rgb.g, rgb.b].map(v => {
+      const c = v / 255;
+      return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * srgb[0] + 0.7152 * srgb[1] + 0.0722 * srgb[2];
+  }
+
+  private hexToRgb(hex: string): { r: number; g: number; b: number } {
+    const clean = hex.replace('#', '');
+    const bigint = parseInt(clean, 16);
+    return {
+      r: (bigint >> 16) & 255,
+      g: (bigint >> 8) & 255,
+      b: bigint & 255
+    };
   }
 
   private generatePlayers(): Player[] {
@@ -183,6 +238,17 @@ export class TeamService {
         `Kickoff! ${teamName} starts the match.`,
         `${teamName} gets us underway.`,
         `The ball rolls — match begins!`
+      ]
+      ,
+      throw_in: [
+        `Throw-in taken by ${playerName} for ${teamName}.`,
+        `${teamName} puts the ball back in play (throw-in).`,
+        `Quick throw by ${playerName}. Game resumes.`
+      ],
+      tackle: [
+        `${playerName} wins the ball with a tackle!`,
+        `Strong challenge from ${playerName}. Possession turned.`,
+        `${playerName} slides in and takes it cleanly!`
       ]
     };
 

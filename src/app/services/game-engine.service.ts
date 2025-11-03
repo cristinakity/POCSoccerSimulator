@@ -399,8 +399,25 @@ export class GameEngineService {
         if (closestOpp) {
           const atkStam = closestOpp.abilities ? closestOpp.abilities.stamina : 50;
           const defStam = owner.abilities ? owner.abilities.stamina : 50;
-          const stealChance = 0.28 + Math.max(-0.15, Math.min(0.25, (atkStam - defStam) / 160));
+          const baseSteal = 0.28 + Math.max(-0.15, Math.min(0.25, (atkStam - defStam) / 160));
+          const possessionElapsed = now - this.possessionStartTime; // ms ball held by current owner
+          // Fairness boost: longer uninterrupted possession increases steal odds gradually
+          const durationBoost = Math.min(0.22, possessionElapsed / 6000 * 0.22); // up to +22% after 6s
+          const fatigueBoost = owner.abilities ? (1 - (owner.abilities.stamina / owner.abilities.maxStamina)) * 0.18 : 0; // low stamina -> easier steal
+          const stealChance = baseSteal + durationBoost + fatigueBoost;
           if (Math.random() < stealChance) {
+            // Tackle event metadata
+            (this as any)._eventExtra = {
+              startX: ball.x,
+              startY: ball.y,
+              endX: ball.x,
+              endY: ball.y,
+              role: closestOpp.role,
+              subtype: 'tackle',
+              result: 'won'
+            };
+            const oppTeamName = this.team1.players.includes(closestOpp) ? this.team1.name : this.team2!.name;
+            this.generateGameEvent('tackle', oppTeamName, closestOpp.name);
             owner = closestOpp; newOwner = closestOpp.id;
             this.possessionLockOwner = newOwner; this.possessionLockUntil = now + 900; this.possessionStartTime = now;
           }
