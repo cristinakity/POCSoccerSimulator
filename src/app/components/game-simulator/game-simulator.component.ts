@@ -2,6 +2,7 @@ import { Component, OnInit, OnDestroy } from '@angular/core';
 import { Subscription } from 'rxjs';
 import { TeamService, Team } from '../../services/team.service';
 import { GameEngineService, GameState } from '../../services/game-engine.service';
+import { environment } from 'src/environments/environment';
 
 @Component({
   selector: 'app-game-simulator',
@@ -114,7 +115,7 @@ export class GameSimulatorComponent implements OnInit, OnDestroy {
   availableTeams: Team[] = [];
   selectedTeam1: string = '';
   selectedTeam2: string = '';
-  gameDuration: number = 30;
+  gameDuration: number = environment.gameSettings.defaultGameDuration;
   isGameRunning: boolean = false;
   
   gameState: GameState = {
@@ -122,7 +123,8 @@ export class GameSimulatorComponent implements OnInit, OnDestroy {
     timeRemaining: 0,
     score: { team1: 0, team2: 0 },
     ball: { x: 450, y: 300, vx: 0, vy: 0 },
-    events: []
+    events: [],
+    currentBallOwner: null
   };
 
   private subscriptions: Subscription[] = [];

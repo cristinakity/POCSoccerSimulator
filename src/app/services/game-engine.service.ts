@@ -9,6 +9,7 @@ export interface GameState {
   score: { team1: number; team2: number };
   ball: { x: number; y: number; vx: number; vy: number };
   events: GameEvent[];
+  currentBallOwner: string | null; // player id of current possession
 }
 
 @Injectable({
@@ -20,13 +21,16 @@ export class GameEngineService {
     timeRemaining: 0,
     score: { team1: 0, team2: 0 },
     ball: { x: 450, y: 300, vx: 0, vy: 0 },
-    events: []
+    events: [],
+    currentBallOwner: null
   });
 
   private gameEvents$ = new Subject<GameEvent>();
   private animationFrameId: number | null = null;
   private gameTimer: number | null = null;
   private lastTime = 0;
+  private lastPassTime = 0; // ms timestamp of last pass
+  private passCooldown = 2500; // ms between passes
 
   private team1: Team | null = null;
   private team2: Team | null = null;
@@ -54,13 +58,15 @@ export class GameEngineService {
       timeRemaining: duration,
       score: { team1: 0, team2: 0 },
       ball: { x: 450, y: 300, vx: Math.random() * 4 - 2, vy: Math.random() * 4 - 2 },
-      events: []
+      events: [],
+      currentBallOwner: null
     };
 
     this.gameState$.next(initialState);
 
     // Start game loop
     this.lastTime = Date.now();
+  this.lastPassTime = this.lastTime;
     this.startGameLoop();
     this.startGameTimer();
 
@@ -94,59 +100,53 @@ export class GameEngineService {
     const fieldWidth = environment.gameSettings.fieldWidth;
     const fieldHeight = environment.gameSettings.fieldHeight;
 
-    // Position team 1 players (left side)
-    this.team1.players.forEach((player, index) => {
-      switch (player.role) {
-        case 'goalkeeper':
-          player.position = { x: 60, y: fieldHeight / 2 };
-          break;
-        case 'defender':
-          player.position = { 
-            x: 150 + (index % 2) * 60, 
-            y: 150 + (index % 3) * 120 
-          };
-          break;
-        case 'midfielder':
-          player.position = { 
-            x: 280 + (index % 2) * 60, 
-            y: 120 + (index % 3) * 140 
-          };
-          break;
-        case 'forward':
-          player.position = { 
-            x: 380 + (index % 2) * 60, 
-            y: 200 + (index % 2) * 200 
-          };
-          break;
-      }
-    });
+    // Helper to distribute players by role using a simple 4-3-3 formation style
+    const assignFormation = (team: Team, side: 'left' | 'right') => {
+      const cols = {
+        goalkeeper: side === 'left' ? 60 : fieldWidth - 60,
+        defender: side === 'left' ? 160 : fieldWidth - 160,
+        midfielder: side === 'left' ? 300 : fieldWidth - 300,
+        forward: side === 'left' ? 460 : fieldWidth - 460
+      };
 
-    // Position team 2 players (right side)
-    this.team2.players.forEach((player, index) => {
-      switch (player.role) {
-        case 'goalkeeper':
-          player.position = { x: fieldWidth - 60, y: fieldHeight / 2 };
-          break;
-        case 'defender':
-          player.position = { 
-            x: fieldWidth - 150 - (index % 2) * 60, 
-            y: 150 + (index % 3) * 120 
-          };
-          break;
-        case 'midfielder':
-          player.position = { 
-            x: fieldWidth - 280 - (index % 2) * 60, 
-            y: 120 + (index % 3) * 140 
-          };
-          break;
-        case 'forward':
-          player.position = { 
-            x: fieldWidth - 380 - (index % 2) * 60, 
-            y: 200 + (index % 2) * 200 
-          };
-          break;
-      }
-    });
+      // Vertical lanes for spacing
+      const lanesDef = [fieldHeight * 0.25, fieldHeight * 0.45, fieldHeight * 0.55, fieldHeight * 0.75];
+      const lanesMid = [fieldHeight * 0.20, fieldHeight * 0.40, fieldHeight * 0.60];
+      const lanesFwd = [fieldHeight * 0.35, fieldHeight * 0.50, fieldHeight * 0.65];
+
+      let defIndex = 0, midIndex = 0, fwdIndex = 0;
+
+      team.players.forEach(p => {
+        switch (p.role) {
+          case 'goalkeeper':
+            p.position = { x: cols.goalkeeper, y: fieldHeight / 2 };
+            break;
+          case 'defender': {
+            const lane = lanesDef[defIndex % lanesDef.length];
+            p.position = { x: cols.defender, y: lane };
+            defIndex++;
+            break;
+          }
+          case 'midfielder': {
+            const lane = lanesMid[midIndex % lanesMid.length];
+            p.position = { x: cols.midfielder, y: lane };
+            midIndex++;
+            break;
+          }
+          case 'forward': {
+            const lane = lanesFwd[fwdIndex % lanesFwd.length];
+            p.position = { x: cols.forward, y: lane };
+            fwdIndex++;
+            break;
+          }
+        }
+        // Store a base position anchor for smarter movement
+        (p as any).basePosition = { ...p.position };
+      });
+    };
+
+    assignFormation(this.team1, 'left');
+    assignFormation(this.team2, 'right');
   }
 
   private startGameLoop(): void {
@@ -185,25 +185,29 @@ export class GameEngineService {
     if (!this.gameState$.value.isRunning) return;
 
     // Update ball position
-    this.updateBallPosition();
+    this.updateBallPosition(deltaTime);
 
     // Update player positions
-    this.updatePlayerPositions();
+    this.updatePlayerPositions(deltaTime);
+
+    // Possession & passing
+    this.updatePossessionAndPassing(deltaTime);
 
     // Generate random events
     this.generateRandomEvents();
   }
 
-  private updateBallPosition(): void {
+  private updateBallPosition(deltaTime: number): void {
     const currentState = this.gameState$.value;
     const fieldWidth = environment.gameSettings.fieldWidth;
     const fieldHeight = environment.gameSettings.fieldHeight;
 
     let ball = { ...currentState.ball };
 
-    // Apply physics
-    ball.x += ball.vx;
-    ball.y += ball.vy;
+    // Apply physics scaled by deltaTime
+    const dt = deltaTime / 16.67; // normalize to ~60fps base
+    ball.x += ball.vx * dt;
+    ball.y += ball.vy * dt;
 
     // Bounce off walls
     if (ball.x <= 20 || ball.x >= fieldWidth - 20) {
@@ -216,9 +220,11 @@ export class GameEngineService {
       ball.y = Math.max(20, Math.min(fieldHeight - 20, ball.y));
     }
 
-    // Add some randomness
-    ball.vx += (Math.random() - 0.5) * 0.2;
-    ball.vy += (Math.random() - 0.5) * 0.2;
+    // Add small randomness when free (no owner)
+    if (!currentState.currentBallOwner) {
+      ball.vx += (Math.random() - 0.5) * 0.15 * dt;
+      ball.vy += (Math.random() - 0.5) * 0.15 * dt;
+    }
 
     // Limit speed
     const maxSpeed = 3;
@@ -228,73 +234,169 @@ export class GameEngineService {
       ball.vy = (ball.vy / speed) * maxSpeed;
     }
 
-    // Apply friction
-    ball.vx *= 0.99;
-    ball.vy *= 0.99;
+  // Apply friction
+  const friction = currentState.currentBallOwner ? 0.995 : 0.99;
+  ball.vx *= friction;
+  ball.vy *= friction;
 
     this.gameState$.next({
       ...currentState,
       ball
     });
+
+  // Physical goal detection using metric scaling
+  const innerHeight = fieldHeight - 20; // inside boundary (top/bottom margins 10 each)
+  const widthScale = innerHeight / environment.gameSettings.pitchWidthM; // px per meter (vertical)
+  const goalMouthPx = environment.gameSettings.goalWidthM * widthScale;
+  const goalZoneTop = (fieldHeight / 2) - goalMouthPx / 2;
+  const goalZoneBottom = goalZoneTop + goalMouthPx;
+    if (ball.x <= 22 && ball.y >= goalZoneTop && ball.y <= goalZoneBottom) {
+      // Goal for team2
+      this.generateGameEvent('goal', this.team2?.name || 'Team 2', 'Goal');
+      this.updateScore('team2');
+      this.resetBallPosition();
+    } else if (ball.x >= fieldWidth - 22 && ball.y >= goalZoneTop && ball.y <= goalZoneBottom) {
+      // Goal for team1
+      this.generateGameEvent('goal', this.team1?.name || 'Team 1', 'Goal');
+      this.updateScore('team1');
+      this.resetBallPosition();
+    } else {
+      // Corner detection: ball hits side boundary outside goal vertical zone
+      if (ball.x <= 20 && (ball.y < goalZoneTop || ball.y > goalZoneBottom)) {
+        this.generateGameEvent('corner', this.team2?.name || 'Team 2', 'Corner');
+      } else if (ball.x >= fieldWidth - 20 && (ball.y < goalZoneTop || ball.y > goalZoneBottom)) {
+        this.generateGameEvent('corner', this.team1?.name || 'Team 1', 'Corner');
+      }
+    }
   }
 
-  private updatePlayerPositions(): void {
+  private updatePlayerPositions(deltaTime: number): void {
     if (!this.team1 || !this.team2) return;
 
     const currentState = this.gameState$.value;
+    const fieldWidth = environment.gameSettings.fieldWidth;
+    const fieldHeight = environment.gameSettings.fieldHeight;
     const ballPos = currentState.ball;
+    const everyone = [...this.team1.players, ...this.team2.players];
 
-    // Simple AI: players move towards ball with some randomness
-    [...this.team1.players, ...this.team2.players].forEach(player => {
-      if (player.role !== 'goalkeeper') {
-        const dx = ballPos.x - player.position.x;
-        const dy = ballPos.y - player.position.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
+    // Choose a limited number of chasers (closest 4 non-goalkeepers)
+    const chasers = everyone
+      .filter(p => p.role !== 'goalkeeper')
+      .map(p => ({ p, d: Math.hypot(ballPos.x - p.position.x, ballPos.y - p.position.y) }))
+      .sort((a, b) => a.d - b.d)
+      .slice(0, 4)
+      .map(x => x.p);
 
-        if (distance > 50) { // Don't crowd the ball
-          const speed = 0.5 + Math.random() * 0.5;
-          const angle = Math.atan2(dy, dx) + (Math.random() - 0.5) * 0.5;
-          
-          player.position.x += Math.cos(angle) * speed;
-          player.position.y += Math.sin(angle) * speed;
-
-          // Keep players on field
-          const fieldWidth = environment.gameSettings.fieldWidth;
-          const fieldHeight = environment.gameSettings.fieldHeight;
-          player.position.x = Math.max(30, Math.min(fieldWidth - 30, player.position.x));
-          player.position.y = Math.max(30, Math.min(fieldHeight - 30, player.position.y));
-        }
+  // Increase scaling to make movement faster (1 sim second = 1 match minute)
+  const dt = (deltaTime / 16.67) * 1.8;
+    everyone.forEach(player => {
+      if (player.role === 'goalkeeper') {
+        // Goalkeeper: track ball vertically, modest horizontal shift when ball enters attacking half
+        const targetY = Math.max(40, Math.min(fieldHeight - 40, ballPos.y));
+        const horizAdjust = Math.abs(ballPos.x - player.position.x) < fieldWidth * 0.55 ? (ballPos.x - player.position.x) * 0.004 : 0;
+        player.position.x += horizAdjust * dt;
+        player.position.y += (targetY - player.position.y) * 0.06 * dt;
+        // Constrain keeper to a corridor near its goal (detect team by membership)
+        const isLeftKeeper = !!this.team1 && this.team1.players.includes(player);
+        player.position.x = isLeftKeeper
+          ? Math.max(30, Math.min(120, player.position.x))
+          : Math.max(fieldWidth - 120, Math.min(fieldWidth - 30, player.position.x));
+        player.position.y = Math.max(40, Math.min(fieldHeight - 40, player.position.y));
+        return;
       }
+      const base = (player as any).basePosition || player.position;
+      const isChasing = chasers.includes(player);
+      const dx = ballPos.x - player.position.x;
+      const dy = ballPos.y - player.position.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+
+    // Movement weighting (accelerated)
+    const chaseFactor = (isChasing ? 1.6 : 0.25) * dt;
+    const formationFactor = 0.06 * dt; // subtle pull to base
+
+      // Random jitter to avoid perfect lines
+  const jitterX = (Math.random() - 0.5) * 0.3 * dt;
+  const jitterY = (Math.random() - 0.5) * 0.3 * dt;
+
+      if (distance > 28) {
+        const angle = Math.atan2(dy, dx);
+        player.position.x += Math.cos(angle) * chaseFactor + (base.x - player.position.x) * formationFactor + jitterX;
+        player.position.y += Math.sin(angle) * chaseFactor + (base.y - player.position.y) * formationFactor + jitterY;
+      } else {
+        // Close to ball: maintain some spacing by nudging toward base
+        player.position.x += (base.x - player.position.x) * 0.07 * dt + jitterX;
+        player.position.y += (base.y - player.position.y) * 0.07 * dt + jitterY;
+      }
+
+      // Keep players on field
+      player.position.x = Math.max(30, Math.min(fieldWidth - 30, player.position.x));
+      player.position.y = Math.max(30, Math.min(fieldHeight - 30, player.position.y));
     });
   }
 
-  private generateRandomEvents(): void {
-    if (Math.random() < 0.0015) { // Adjusted probability
-      const eventTypes = ['goal', 'foul', 'corner', 'offside', 'yellow_card'];
-      const weights = [1, 3, 2, 2, 1]; // Goal is less likely but more exciting
-      
-      let totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-      let random = Math.random() * totalWeight;
-      
-      let eventType = eventTypes[0];
-      for (let i = 0; i < eventTypes.length; i++) {
-        if (random < weights[i]) {
-          eventType = eventTypes[i];
-          break;
-        }
-        random -= weights[i];
+  private updatePossessionAndPassing(deltaTime: number): void {
+    if (!this.team1 || !this.team2) return;
+    const currentState = this.gameState$.value;
+    const ball = currentState.ball;
+    const allPlayers = [...this.team1.players, ...this.team2.players];
+
+    // Determine possession: closest player within radius
+    const possessionRadius = 18;
+    let owner: Player | null = null; // explicit type avoids 'never'
+    let minDist = Infinity;
+    allPlayers.forEach(p => {
+      const d = Math.hypot(p.position.x - ball.x, p.position.y - ball.y);
+      if (d < possessionRadius && d < minDist) {
+        minDist = d;
+        owner = p;
       }
-      
+    });
+
+    let newOwnerId: string | null = null;
+    if (owner !== null) {
+      newOwnerId = (owner as Player).id;
+    }
+
+    // Passing logic: if owner exists and cooldown passed, pass forward to a teammate
+    const now = Date.now();
+    if (owner && now - this.lastPassTime > this.passCooldown) {
+      const ownerPlayer = owner as Player; // stabilize narrowing for arrow callbacks
+      const sameTeam: Player[] = this.team1.players.includes(ownerPlayer) ? this.team1.players : this.team2.players;
+      const ownerSideLeft = ownerPlayer.position.x < environment.gameSettings.fieldWidth / 2;
+      // Prefer players further forward in owner's attack direction
+      const forwardCandidates: Player[] = sameTeam.filter(p => p.id !== ownerPlayer.id && (ownerSideLeft ? p.position.x > ownerPlayer.position.x : p.position.x < ownerPlayer.position.x));
+      const candidates: Player[] = forwardCandidates.length > 0 ? forwardCandidates : sameTeam.filter(p => p.id !== ownerPlayer.id);
+      if (candidates.length > 0) {
+        const target = candidates[Math.floor(Math.random() * candidates.length)];
+        const dx = target.position.x - ball.x;
+        const dy = target.position.y - ball.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        const speed = 9; // faster pass speed to match accelerated simulation
+        const vx = (dx / dist) * speed;
+        const vy = (dy / dist) * speed;
+        const updated = { ...currentState.ball, vx, vy };
+        this.gameState$.next({ ...currentState, ball: updated, currentBallOwner: ownerPlayer.id });
+        this.lastPassTime = now;
+        this.generateGameEvent('substitution', (sameTeam === this.team1.players ? this.team1.name : this.team2!.name), `${ownerPlayer.name} PASS`);
+        return;
+      }
+    }
+
+    // Update state if ownership changed
+    if (newOwnerId !== currentState.currentBallOwner) {
+      this.gameState$.next({ ...currentState, currentBallOwner: newOwnerId });
+    }
+  }
+
+  private generateRandomEvents(): void {
+    // Remove random goal generation; keep rare fouls & offsides for flavor
+    if (Math.random() < 0.0012) {
+      const eventTypes = ['foul', 'offside', 'yellow_card'];
+      const chosen = eventTypes[Math.floor(Math.random() * eventTypes.length)];
       const team = Math.random() < 0.5 ? this.team1 : this.team2;
       if (team) {
         const player = team.players[Math.floor(Math.random() * team.players.length)];
-        this.generateGameEvent(eventType, team.name, player.name);
-
-        if (eventType === 'goal') {
-          this.updateScore(team.id === this.team1?.id ? 'team1' : 'team2');
-          // Reset ball position after goal
-          this.resetBallPosition();
-        }
+        this.generateGameEvent(chosen, team.name, player.name);
       }
     }
   }
@@ -320,12 +422,22 @@ export class GameEngineService {
     const totalTime = this.gameDuration;
     const elapsedTime = totalTime - currentState.timeRemaining;
 
+     // Scale elapsedTime to real match minutes (45 min half simulation mapping)
+     const scaleFactor = 45 / totalTime; // simulation duration maps to 45 real minutes
+     const realMinuteFloat = elapsedTime * scaleFactor;
+     const realMinute = Math.min(45, Math.floor(realMinuteFloat));
+     const displayMins = Math.floor(realMinuteFloat);
+     const displaySecs = Math.floor((realMinuteFloat - displayMins) * 60);
+     const displayTime = `${displayMins.toString().padStart(2,'0')}:${displaySecs.toString().padStart(2,'0')}`;
+
     const event: GameEvent = {
       time: elapsedTime,
       type: type as any,
       team: teamName,
       player: playerName,
-      description: this.getEventDescription(type, playerName, teamName)
+      description: this.getEventDescription(type, playerName, teamName),
+      displayTime,
+      realMinute
     };
 
     const newEvents = [...currentState.events, event];

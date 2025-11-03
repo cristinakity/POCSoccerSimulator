@@ -11,7 +11,7 @@ import { GameEvent } from '../../services/team.service';
           *ngFor="let event of events; let i = index; trackBy: trackByIndex" 
           [class]="'log-entry ' + event.type"
         >
-          <strong>{{formatTime(event.time)}}</strong> - {{event.description}}
+          <strong>{{event.displayTime || formatTime(event.time)}}</strong> - {{event.description}}
         </div>
         <div *ngIf="events.length === 0" class="no-events">
           No events yet. Start the game to see the action!

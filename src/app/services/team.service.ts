@@ -20,6 +20,8 @@ export interface GameEvent {
   team: string;
   player: string;
   description: string;
+  displayTime?: string; // scaled match clock (e.g., 12:34)
+  realMinute?: number;  // corresponding real 45-min match minute (0-45)
 }
 
 @Injectable({
