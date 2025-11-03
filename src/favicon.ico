@@ -1,0 +1,9 @@
+<!-- Simple SVG favicon as placeholder -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <circle cx="50" cy="50" r="45" fill="#228B22" stroke="#fff" stroke-width="3"/>
+  <circle cx="50" cy="50" r="35" fill="none" stroke="#fff" stroke-width="2"/>
+  <polygon points="50,20 60,35 45,35" fill="#fff"/>
+  <polygon points="50,80 40,65 55,65" fill="#fff"/>
+  <polygon points="20,50 35,40 35,55" fill="#fff"/>
+  <polygon points="80,50 65,60 65,45" fill="#fff"/>
+</svg>

@@ -1,0 +1,10 @@
+export const environment = {
+  production: true,
+  gameSettings: {
+    defaultGameDuration: 30, // seconds
+    fieldWidth: 900,
+    fieldHeight: 600,
+    playerSize: 12,
+    ballSize: 8
+  }
+};

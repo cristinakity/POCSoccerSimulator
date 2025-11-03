@@ -1,0 +1,130 @@
+import { Injectable } from '@angular/core';
+
+export interface Team {
+  id: string;
+  name: string;
+  color: string;
+  players: Player[];
+}
+
+export interface Player {
+  id: string;
+  name: string;
+  position: { x: number; y: number };
+  role: 'goalkeeper' | 'defender' | 'midfielder' | 'forward';
+}
+
+export interface GameEvent {
+  time: number;
+  type: 'goal' | 'foul' | 'substitution' | 'corner' | 'offside' | 'yellow_card' | 'red_card';
+  team: string;
+  player: string;
+  description: string;
+}
+
+@Injectable({
+  providedIn: 'root'
+})
+export class TeamService {
+  private funnyTeamNames = [
+    'Lightning Llamas', 'Crazy Coconuts', 'Flying Flamingos', 'Dancing Dragons',
+    'Bouncing Bananas', 'Mighty Marshmallows', 'Sneaky Squirrels', 'Giggling Giraffes',
+    'Roaring Rubber Ducks', 'Blazing Butterflies', 'Thundering Tacos', 'Jumping Jellybeans',
+    'Spinning Spiders', 'Magical Muffins', 'Warrior Waffles', 'Cosmic Cookies',
+    'Fantastic Frogs', 'Ninja Noodles', 'Super Sloths', 'Incredible Ice Cream',
+    'Wacky Wizards', 'Funky Foxes', 'Silly Sharks', 'Marvelous Monkeys'
+  ];
+
+  private funnyPlayerNames = [
+    'Speedy Gonzalez', 'Captain Crunch', 'Sir Kicks-a-Lot', 'The Flash Gordon',
+    'Messi McMessface', 'Goal Digger', 'Ronaldo Rascal', 'Pele Banana',
+    'Beckham Boom', 'Zlatan Zap', 'Ninja Turtle', 'Super Mario',
+    'Rocket Man', 'Thunder Bolt', 'Captain Awesome', 'The Magician',
+    'Speed Demon', 'Goal Machine', 'The Professor', 'Wonder Kid',
+    'Lightning Lee', 'Boom Boom', 'The Wizard', 'Mr. Fantastic',
+    'Turbo Tom', 'Flash Fred', 'Mega Mike', 'Power Pete',
+    'Sonic Sam', 'Blaze Billy', 'Storm Steve', 'Dash Dan'
+  ];
+
+  private teamColors = [
+    '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7',
+    '#DDA0DD', '#FFB347', '#98D8C8', '#F7DC6F', '#AED6F1',
+    '#F1948A', '#82E0AA', '#D7BDE2', '#F8C471', '#85C1E9',
+    '#FF8A80', '#80CBC4', '#81C784', '#FFB74D', '#F48FB1'
+  ];
+
+  generateRandomTeams(): Team[] {
+    const shuffledNames = [...this.funnyTeamNames].sort(() => Math.random() - 0.5);
+    const shuffledColors = [...this.teamColors].sort(() => Math.random() - 0.5);
+    
+    const teams: Team[] = [];
+    
+    for (let i = 0; i < Math.min(12, shuffledNames.length); i++) {
+      teams.push({
+        id: `team_${i}`,
+        name: shuffledNames[i],
+        color: shuffledColors[i],
+        players: this.generatePlayers()
+      });
+    }
+    
+    return teams;
+  }
+
+  private generatePlayers(): Player[] {
+    const shuffledPlayerNames = [...this.funnyPlayerNames].sort(() => Math.random() - 0.5);
+    const roles: ('goalkeeper' | 'defender' | 'midfielder' | 'forward')[] = [
+      'goalkeeper',
+      'defender', 'defender', 'defender', 'defender',
+      'midfielder', 'midfielder', 'midfielder',
+      'forward', 'forward', 'forward'
+    ];
+
+    return roles.map((role, index) => ({
+      id: `player_${index}`,
+      name: shuffledPlayerNames[index] || `Player ${index + 1}`,
+      position: { x: 0, y: 0 }, // Will be set during game initialization
+      role
+    }));
+  }
+
+  getRandomEventDescription(eventType: string, playerName: string, teamName: string): string {
+    const events = {
+      goal: [
+        `GOAAAAL! ${playerName} scores for ${teamName}!`,
+        `${playerName} finds the back of the net! What a shot!`,
+        `Amazing goal by ${playerName}! The crowd goes wild!`,
+        `${playerName} strikes! It's a goal for ${teamName}!`,
+        `INCREDIBLE! ${playerName} scores a spectacular goal!`
+      ],
+      foul: [
+        `${playerName} commits a foul. Free kick awarded!`,
+        `Ouch! ${playerName} goes in too hard!`,
+        `${playerName} gets a bit too aggressive there!`,
+        `The referee blows the whistle - foul by ${playerName}!`,
+        `Yellow card territory for ${playerName}!`
+      ],
+      corner: [
+        `Corner kick for ${teamName}!`,
+        `${playerName} wins a corner!`,
+        `Great defending forces a corner kick!`,
+        `${teamName} gets a dangerous corner opportunity!`
+      ],
+      offside: [
+        `${playerName} is caught offside!`,
+        `Offside! ${playerName} was too eager!`,
+        `The linesman raises the flag - offside!`,
+        `${playerName} needs to watch the line!`
+      ],
+      yellow_card: [
+        `Yellow card for ${playerName}!`,
+        `${playerName} gets booked!`,
+        `The referee shows yellow to ${playerName}!`,
+        `${playerName} needs to be more careful!`
+      ]
+    };
+
+    const eventList = events[eventType as keyof typeof events] || [`${playerName} is involved in the action!`];
+    return eventList[Math.floor(Math.random() * eventList.length)];
+  }
+}
