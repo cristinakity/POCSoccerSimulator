@@ -45,6 +45,7 @@ export class GameEngineService {
   private stagnationStartTs = 0;
   private stagnationRefX = 0;
   private restartGraceUntil = 0; // suppress certain rule checks (offside) briefly after restarts
+  private friendlyContestGraceUntil = 0; // prevent rapid same-team possession churn
 
   getGameState(): Observable<GameState> { return this.gameState$.asObservable(); }
   getGameEvents(): Observable<GameEvent> { return this.gameEvents$.asObservable(); }
@@ -524,14 +525,14 @@ export class GameEngineService {
             const oppTeamName = this.team1.players.includes(closestOpp) ? this.team1.name : this.team2!.name;
             this.generateGameEvent('tackle', oppTeamName, closestOpp.name);
             owner = closestOpp; newOwner = closestOpp.id;
-            this.possessionLockOwner = newOwner; this.possessionLockUntil = now + 900; this.possessionStartTime = now;
+            this.possessionLockOwner = newOwner; this.possessionLockUntil = now + 900; this.possessionStartTime = now; this.friendlyContestGraceUntil = now + 1200;
           }
         }
       }
     } else {
       let minD = Infinity;
       all.forEach(p => { const d = Math.hypot(p.position.x - ball.x, p.position.y - ball.y); if (d < possessionRadius && d < minD) { minD = d; owner = p; } });
-  if (owner) { const o = owner as Player; newOwner = o.id; this.possessionLockOwner = newOwner; this.possessionLockUntil = now + 900; this.possessionStartTime = now; }
+  if (owner) { const o = owner as Player; newOwner = o.id; this.possessionLockOwner = newOwner; this.possessionLockUntil = now + 900; this.possessionStartTime = now; this.friendlyContestGraceUntil = now + 1200; }
     }
     if (owner) {
   const leftSide = this.team1!.players.includes(owner);
@@ -672,6 +673,8 @@ export class GameEngineService {
             const targetX = target.position.x + lead;
             const targetY = target.position.y + (Math.random() - 0.5) * (18 / passAccFactor);
             const ndx = targetX - ball.x; const ndy = targetY - ball.y; const nd = Math.hypot(ndx, ndy) || 1;
+            // If target extremely close, avoid pointless micro-pass that looks like teammates fighting
+            if (nd < 34) { this.lastPassTime = now + 300; return; }
             const vx = (ndx / nd) * passSpeed; const vy = (ndy / nd) * passSpeed;
             // Offside check at pass moment (skip if within grace window)
             const ownerIsTeam1 = this.team1!.players.includes(owner!);
@@ -744,6 +747,10 @@ export class GameEngineService {
       }
     }
     if (newOwner !== state.currentBallOwner) { this.gameState$.next({ ...state, currentBallOwner: newOwner }); }
+    // Extend lock slightly if friendly contest grace is active to reduce churn
+    if (newOwner === state.currentBallOwner && now < this.friendlyContestGraceUntil) {
+      this.possessionLockUntil = Math.max(this.possessionLockUntil, now + 300);
+    }
   }
 
 
