@@ -135,14 +135,22 @@ export class SoccerFieldComponent implements OnInit, AfterViewInit, OnDestroy {
     this.ctx.beginPath(); this.ctx.arc(penSpotXLeft, centerY, 3, 0, 2 * Math.PI); this.ctx.fill();
     this.ctx.beginPath(); this.ctx.arc(penSpotXRight, centerY, 3, 0, 2 * Math.PI); this.ctx.fill();
 
-    // Penalty arcs (9.15m radius) centered at penalty spot, trimmed outside area
-    const arcR = gs.centerCircleRadiusM * pxPerMeterY;
-    this.ctx.beginPath();
-    this.ctx.arc(penSpotXLeft, centerY, arcR, -0.6, 0.6); // facing outwards
-    this.ctx.stroke();
-    this.ctx.beginPath();
-    this.ctx.arc(penSpotXRight, centerY, arcR, Math.PI - 0.6, Math.PI + 0.6);
-    this.ctx.stroke();
+  // Penalty arcs (9.15m radius) tangent to penalty area line
+  const arcR = gs.centerCircleRadiusM * pxPerMeterY;
+  // Distance from penalty spot (11m) to penalty area line (16.5m) horizontally
+  const spotToBoxEdgeM = gs.penaltyAreaDepthM - gs.penaltySpotDistM; // 5.5m
+  const spotToBoxEdgePx = spotToBoxEdgeM * pxPerMeterX;
+  // Tangent angle: cos(theta) = adjacent / radius (using vertical radius)
+  const ratio = Math.min(1, spotToBoxEdgePx / arcR);
+  const theta = Math.acos(ratio); // angle above/below horizontal center line
+  // Left arc (open toward midfield)
+  this.ctx.beginPath();
+  this.ctx.arc(penSpotXLeft, centerY, arcR, -theta, theta);
+  this.ctx.stroke();
+  // Right arc (mirror)
+  this.ctx.beginPath();
+  this.ctx.arc(penSpotXRight, centerY, arcR, Math.PI - theta, Math.PI + theta);
+  this.ctx.stroke();
 
     // Goals (7.32m width, 2.44m height) simplified 2D front view outside boundary
     const goalWidthPx = gs.goalWidthM * pxPerMeterY;
