@@ -779,15 +779,14 @@ export class GameEngineService {
   private initializePlayerPositions(): void {
     if (!this.team1 || !this.team2) return;
     
-    // Realistic football formations with proper spacing
+    // Formation templates with CLEAR SEPARATION between 3 lines
     const formations = [
-      { name: '4-3-3', gk: 1, def: 4, mid: 3, fwd: 3, defX: 0.20, midX: 0.45, fwdX: 0.70, defSpread: 0.65, midSpread: 0.50, fwdSpread: 0.60 },
-      { name: '4-4-2', gk: 1, def: 4, mid: 4, fwd: 2, defX: 0.22, midX: 0.50, fwdX: 0.72, defSpread: 0.65, midSpread: 0.70, fwdSpread: 0.35 },
-      { name: '3-5-2', gk: 1, def: 3, mid: 5, fwd: 2, defX: 0.18, midX: 0.50, fwdX: 0.75, defSpread: 0.55, midSpread: 0.75, fwdSpread: 0.35 },
-      { name: '4-2-3-1', gk: 1, def: 4, mid: 5, fwd: 1, defX: 0.22, midX: 0.48, fwdX: 0.78, defSpread: 0.65, midSpread: 0.68, fwdSpread: 0.0 },
-      { name: '3-4-3', gk: 1, def: 3, mid: 4, fwd: 3, defX: 0.18, midX: 0.48, fwdX: 0.72, defSpread: 0.50, midSpread: 0.68, fwdSpread: 0.58 },
-      { name: '5-3-2', gk: 1, def: 5, mid: 3, fwd: 2, defX: 0.20, midX: 0.48, fwdX: 0.70, defSpread: 0.72, midSpread: 0.50, fwdSpread: 0.38 },
-      { name: '4-1-4-1', gk: 1, def: 4, mid: 5, fwd: 1, defX: 0.22, midX: 0.52, fwdX: 0.78, defSpread: 0.65, midSpread: 0.70, fwdSpread: 0.0 }
+      { name: '4-3-3', defX: 0.20, midX: 0.50, fwdX: 0.75, defSpread: 0.55, midSpread: 0.40, fwdSpread: 0.50 },
+      { name: '4-4-2', defX: 0.20, midX: 0.50, fwdX: 0.78, defSpread: 0.55, midSpread: 0.60, fwdSpread: 0.25 },
+      { name: '3-5-2', defX: 0.18, midX: 0.50, fwdX: 0.78, defSpread: 0.40, midSpread: 0.65, fwdSpread: 0.25 },
+      { name: '4-2-3-1', defX: 0.20, midX: 0.55, fwdX: 0.82, defSpread: 0.55, midSpread: 0.55, fwdSpread: 0.0 },
+      { name: '3-4-3', defX: 0.18, midX: 0.50, fwdX: 0.75, defSpread: 0.40, midSpread: 0.58, fwdSpread: 0.50 },
+      { name: '5-3-2', defX: 0.20, midX: 0.52, fwdX: 0.78, defSpread: 0.62, midSpread: 0.40, fwdSpread: 0.25 }
     ];
     
     const placeTeam = (team: Team, left: boolean) => {
@@ -797,56 +796,73 @@ export class GameEngineService {
       // Pick a random formation for this team
       const formation = formations[Math.floor(this.rand() * formations.length)];
       
+      // Separate players by role
       const gk = team.players.filter(p => p.role === 'goalkeeper');
       const defs = team.players.filter(p => p.role === 'defender');
       const mids = team.players.filter(p => p.role === 'midfielder');
       const fwds = team.players.filter(p => p.role === 'forward');
       
-      // Assign players to lines based on formation
-      const assignLine = (arr: Player[], depth: number, spread: number) => {
+      console.log(`📊 Team ${team.name}: GK=${gk.length}, DEF=${defs.length}, MID=${mids.length}, FWD=${fwds.length}`);
+      
+      // Helper to position a line of players with CLEAR horizontal separation
+      const assignLine = (arr: Player[], depth: number, spread: number, lineName: string) => {
+        if (arr.length === 0) {
+          console.log(`⚠️ ${lineName} line is EMPTY!`);
+          return;
+        }
+        
+        // For left team: depth increases toward opponent (0 = own goal, 1 = opponent goal)
+        // For right team: depth increases toward opponent (1 = own goal, 0 = opponent goal)
         const cx = depth * W;
+        const actualX = left ? cx : W - cx;
+        console.log(`➡️ Positioning ${lineName}: ${arr.length} players at X=${actualX.toFixed(0)} (depth=${depth}, side=${left ? 'LEFT' : 'RIGHT'})`);
+        
         arr.forEach((p, i) => {
+          // Calculate position in line (from -0.5 to +0.5)
           const rel = arr.length === 1 ? 0 : (i / (arr.length - 1) - 0.5);
+          // Vertical position with spread
           const y = H / 2 + rel * spread * H;
-          p.position.x = (left ? cx : W - cx);
-          p.position.y = Math.max(20, Math.min(H - 20, y));
+          // Horizontal position - EXACT depth for clear line visibility
+          p.position.x = actualX;
+          p.position.y = Math.max(40, Math.min(H - 40, y));
+          console.log(`   Player ${p.name}: (${p.position.x.toFixed(0)}, ${p.position.y.toFixed(0)})`);
         });
       };
       
-      // Position goalkeeper
+      // Position goalkeeper at goal line, centered
       gk.forEach(p => { 
         p.position.x = left ? W * 0.06 : W * 0.94; 
         p.position.y = H / 2; 
       });
       
-      // Position outfield players according to formation
-      assignLine(defs, formation.defX, formation.defSpread);
-      assignLine(mids, formation.midX, formation.midSpread);
-      assignLine(fwds, formation.fwdX, formation.fwdSpread);
+      // Position the three outfield lines with DISTINCT horizontal positions
+      // NOTE: depth is relative to own goal (0 = at own goal, 1 = at opponent goal)
+      assignLine(defs, formation.defX, formation.defSpread, 'DEFENSE');   // Back line: ~20% from own goal
+      assignLine(mids, formation.midX, formation.midSpread, 'MIDFIELD');   // Middle line: ~50% from own goal
+      assignLine(fwds, formation.fwdX, formation.fwdSpread, 'FORWARD');   // Front line: ~75-82% from own goal
       
-      // Ensure players start in their own half
+      // Ensure all players start in their own half
       const mid = W / 2;
       team.players.forEach(p => {
         if (p.role !== 'goalkeeper') {
-          if (left && p.position.x > mid - 20) p.position.x = mid - 20;
-          if (!left && p.position.x < mid + 20) p.position.x = mid + 20;
+          if (left && p.position.x > mid - 30) p.position.x = mid - 30;
+          if (!left && p.position.x < mid + 30) p.position.x = mid + 30;
         }
       });
       
-      // Store formation info for logging
-      console.log(`${team.name} formation: ${formation.name}`);
+      // Build actual formation string based on player count
+      const actualFormation = `${defs.length}-${mids.length}-${fwds.length}`;
       
-      // Return the formation name so we can emit an event
-      return formation.name;
+      return actualFormation;
     };
     
-    // Each team gets a random formation independently
+    // Each team gets a random formation template independently
     const team1Formation = placeTeam(this.team1, true);
     const team2Formation = placeTeam(this.team2, false);
     
     // Log formations clearly
-    console.log(`🔷 ${this.team1.name} will play with ${team1Formation} formation`);
-    console.log(`🔶 ${this.team2.name} will play with ${team2Formation} formation`);
+    console.log(`🔷 ${this.team1.name} will play ${team1Formation} formation`);
+    console.log(`🔶 ${this.team2.name} will play ${team2Formation} formation`);
     
     // Store base positions for each player (their "home" position in formation)
     [...this.team1.players, ...this.team2.players].forEach(p => { 
