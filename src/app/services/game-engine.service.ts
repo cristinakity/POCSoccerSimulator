@@ -122,7 +122,8 @@ export class GameEngineService {
 
     const kickoffPlayer = this.findKickoffPlayer(coinWinner, fieldWidth, fieldHeight);
     if (kickoffPlayer) {
-      kickoffPlayer.position.x = fieldWidth / 2 - (this.team1 === coinWinner ? 8 : -8);
+      // Place kickoff player at center circle
+      kickoffPlayer.position.x = fieldWidth / 2;
       kickoffPlayer.position.y = fieldHeight / 2;
       this.gameState$.next({
         ...this.gameState$.value,
@@ -143,7 +144,14 @@ export class GameEngineService {
     setTimeout(() => {
       const gs = this.gameState$.value;
       if (gs.phase === 'kickoff' && kickoffPlayer) {
-        this.emitEvent('kickoff', coinWinner.name, kickoffPlayer.name);
+        this.emitEvent('kickoff', coinWinner.name, kickoffPlayer.name, undefined, { 
+          startX: fieldWidth / 2, 
+          startY: fieldHeight / 2, 
+          endX: fieldWidth / 2, 
+          endY: fieldHeight / 2, 
+          result: 'restart', 
+          subtype: 'kickoff' 
+        });
         this.gameState$.next({ ...gs, isRunning: true, phase: 'inplay' });
         this.startGameTimer();
       }
@@ -281,8 +289,7 @@ export class GameEngineService {
           // Target is close, give them the ball and emit completed pass
           this.emitEvent('pass', this.teamOfPlayer(p.target).name, p.target.name, `${p.passer.name} completes ${passType} to ${p.target.name}`, { startX: p.startX, startY: p.startY, endX: x, endY: y, subtype: passType, result: 'complete', role: p.target.role });
           this.setBallOwner(p.target);
-          x = p.target.position.x;
-          y = p.target.position.y;
+          // Don't teleport - ball will follow player in next frame
           vx = 0;
           vy = 0;
         }
@@ -360,6 +367,22 @@ export class GameEngineService {
     const attackingTeam = ownerIsTeam1 == null ? null : (ownerIsTeam1 ? this.team1! : this.team2!);
     const defendingTeam = ownerIsTeam1 == null ? null : (ownerIsTeam1 ? this.team2! : this.team1!);
 
+    // Smart ball handoff: check if a teammate is closer to the ball than current owner
+    if (ballOwner && attackingTeam) {
+      const closestTeammate = attackingTeam.players
+        .filter(p => p.id !== ballOwner.id && p.role !== 'goalkeeper')
+        .map(p => ({ p, d: Math.hypot(p.position.x - ball.x, p.position.y - ball.y) }))
+        .sort((a, b) => a.d - b.d)[0];
+      
+      const ownerDist = Math.hypot(ballOwner.position.x - ball.x, ballOwner.position.y - ball.y);
+      
+      // Handoff if teammate is significantly closer (at least 15 units closer and within 12 units of ball)
+      if (closestTeammate && closestTeammate.d < ownerDist - 15 && closestTeammate.d < 12) {
+        this.setBallOwner(closestTeammate.p);
+        return; // Exit early to update with new owner next frame
+      }
+    }
+
     // Pressers: when ball is owned, limit to 2 defenders; when loose, pick closest 3 from all players
     let pressers: Player[] = [];
     if (ballOwner && defendingTeam) {
@@ -377,11 +400,26 @@ export class GameEngineService {
         .map(o => o.p);
     }
 
-    // Support runner (closest non-owner attacker)
-    let support: Player | null = null;
+    // Support runners: find 2-3 attacking teammates who should position for passes
+    let supportRunners: Player[] = [];
     if (attackingTeam && ballOwner) {
-      support = attackingTeam.players.filter(p => p.id !== ballOwner.id && p.role !== 'goalkeeper')
-        .sort((a, b) => Math.hypot(a.position.x - ball.x, a.position.y - ball.y) - Math.hypot(b.position.x - ball.x, b.position.y - ball.y))[0] || null;
+      const candidates = attackingTeam.players.filter(p => p.id !== ballOwner.id && p.role !== 'goalkeeper');
+      const attackDir = ownerIsTeam1 ? 1 : -1;
+      
+      // Prioritize forwards and attacking midfielders
+      const forwards = candidates.filter(p => p.role === 'forward');
+      const midfielders = candidates.filter(p => p.role === 'midfielder');
+      
+      supportRunners = [...forwards, ...midfielders]
+        .sort((a, b) => {
+          // Prefer players ahead of the ball and closer to opponent's goal
+          const aDist = Math.hypot(a.position.x - ball.x, a.position.y - ball.y);
+          const bDist = Math.hypot(b.position.x - ball.x, b.position.y - ball.y);
+          const aAhead = (a.position.x - ball.x) * attackDir;
+          const bAhead = (b.position.x - ball.x) * attackDir;
+          return (bAhead - aAhead) * 0.5 + (aDist - bDist);
+        })
+        .slice(0, 3);
     }
 
     allPlayers.forEach(p => {
@@ -391,15 +429,82 @@ export class GameEngineService {
       
       // Goalkeeper special logic: stay near goal line and track ball vertically
       if (p.role === 'goalkeeper') {
-        const goalX = dir === 1 ? this.W * 0.06 : this.W * 0.94;
-        const targetY = Math.max(this.H * 0.3, Math.min(this.H * 0.7, ball.y));
-        const dx = goalX - p.position.x;
+        // Each goalkeeper defends their own goal - STAY ON THE GOAL LINE
+        const goalLineX = dir === 1 ? this.W * 0.04 : this.W * 0.96;
+        const defendingGoalX = dir === 1 ? 0 : this.W;
+        
+        // Calculate goal width (aperture)
+        const goalHalfWidth = (environment.gameSettings.goalWidthM * (this.H / environment.gameSettings.pitchWidthM)) / 2;
+        const goalTop = this.H / 2 - goalHalfWidth;
+        const goalBottom = this.H / 2 + goalHalfWidth;
+        
+        // Calculate if ball is in this goalkeeper's defensive third (not just half)
+        const ballInDefensiveThird = dir === 1 ? ball.x < this.W * 0.33 : ball.x > this.W * 0.67;
+        const ballInKeepersArea = dir === 1 ? ball.x < this.W * 0.15 : ball.x > this.W * 0.85;
+        
+        // Track ball vertically, but with damping based on distance from goal
+        const distFromGoal = Math.abs(ball.x - defendingGoalX);
+        const distToBall = Math.hypot(p.position.x - ball.x, p.position.y - ball.y);
+        const threatLevel = Math.max(0, 1 - (distFromGoal / (this.W * 0.33))); // 1.0 when ball at goal, 0.0 at defensive third line
+        
+        // If ball is loose and very close to keeper's area, rush to collect it
+        let targetX = goalLineX;
+        let targetY = this.H / 2;
+        
+        if (!ballOwner && ballInKeepersArea && distToBall < 30) {
+          // Rush toward the loose ball to collect it
+          targetX = p.position.x + (ball.x - p.position.x) * 0.7;
+          targetY = p.position.y + (ball.y - p.position.y) * 0.7;
+          
+          // Clamp to defensive area
+          if (dir === 1) {
+            targetX = Math.min(targetX, this.W * 0.12);
+          } else {
+            targetX = Math.max(targetX, this.W * 0.88);
+          }
+        } else {
+          // Normal positioning: stay on goal line
+          targetX = goalLineX;
+          
+          // Only track ball vertically when it's close and represents a threat
+          if (ballInDefensiveThird && threatLevel > 0.3) {
+            // Track ball position with heavy smoothing - stay centered but ready
+            const trackingInfluence = threatLevel * 0.5;
+            targetY = this.H / 2 + (ball.y - this.H / 2) * trackingInfluence;
+          } else {
+            // When ball is far away, return to center of goal
+            targetY = this.H / 2;
+          }
+        }
+        
+        // STRICTLY clamp goalkeeper to stay within goal width vertically
+        targetY = Math.max(goalTop + 5, Math.min(goalBottom - 5, targetY));
+        
+        // Movement to target position
+        const dx = targetX - p.position.x;
         const dy = targetY - p.position.y;
         const d = Math.hypot(dx, dy) || 1;
-        if (d > 1) {
-          p.position.x += (dx / d) * baseSpeed * 0.4;
-          p.position.y += (dy / d) * baseSpeed * 0.6; // faster vertical tracking
+        
+        if (d > 0.5) {
+          // Adjust speed based on whether collecting or positioning
+          const isRushing = !ballOwner && ballInKeepersArea && distToBall < 30;
+          const horizontalSpeed = isRushing ? baseSpeed * 1.2 : baseSpeed * 0.8;
+          const verticalSpeed = baseSpeed * (0.3 + threatLevel * 0.3);
+          
+          p.position.x += (dx / d) * horizontalSpeed;
+          p.position.y += (dy / d) * verticalSpeed;
         }
+        
+        // FORCE goalkeeper to stay on goal line - never venture out too far
+        const maxDeviation = !ballOwner && ballInKeepersArea ? 35 : 8; // Can move further for loose balls
+        if (dir === 1) {
+          p.position.x = Math.min(p.position.x, this.W * 0.04 + maxDeviation);
+        } else {
+          p.position.x = Math.max(p.position.x, this.W * 0.96 - maxDeviation);
+        }
+        
+        // FORCE goalkeeper to stay within goal frame vertically
+        p.position.y = Math.max(goalTop, Math.min(goalBottom, p.position.y));
       } else if (isOwner) {
         // Dribbler: smooth forward advance with minimal lateral noise
         const staminaFactor = p.abilities?.stamina && p.abilities?.maxStamina ? Math.max(0.6, p.abilities.stamina / p.abilities.maxStamina) : 1;
@@ -412,43 +517,136 @@ export class GameEngineService {
         const pressSpeed = Math.min(baseSpeed * 1.1, baseSpeed * 0.9 * (p.abilities?.speedFactor ?? 1));
         const moveX = (dx / d) * pressSpeed; const moveY = (dy / d) * pressSpeed;
         p.position.x += moveX * 0.7; p.position.y += moveY * 0.7;
-      } else if (support && p.id === support.id) {
-        // Support runner: smooth offset toward space near ball
-        const offsetX = (ball.x - basePos.x) * 0.20;
-        const offsetY = (ball.y - basePos.y) * 0.25;
-        const targetX = basePos.x + offsetX; const targetY = basePos.y + offsetY;
-        const dx = targetX - p.position.x; const dy = targetY - p.position.y; const d = Math.hypot(dx, dy) || 1;
-        if (d > 3) {
-          p.position.x += (dx / d) * baseSpeed * 0.5; p.position.y += (dy / d) * baseSpeed * 0.5;
-        }
-      } else {
-        // Shape holders: gentle drift toward formation position with contextual shift
-        let shiftX = (ball.x - this.W / 2) * 0.03 * dir;
-        let shiftY = (ball.y - this.H / 2) * 0.05;
-        if (ballOwner) {
-          const sameSide = ownerIsTeam1 === this.isTeam1(p);
-          if (sameSide) {
-            const behindBall = (p.position.x * dir) < (ball.x * dir - 60);
-            if (behindBall) shiftX += 12 * dir;
+      } else if (supportRunners.includes(p)) {
+        // Support runners: intelligent positioning for receiving passes
+        // Forwards should only push forward when team is attacking
+        const goalX = dir === 1 ? this.W : 0;
+        const distToGoal = Math.abs(goalX - p.position.x);
+        
+        // Check if team is in attacking phase (ball in opponent's half)
+        const ballInOpponentHalf = dir === 1 ? ball.x > this.W * 0.5 : ball.x < this.W * 0.5;
+        const ballProgress = (ball.x - this.W / 2) * dir; // Positive when attacking, negative when defending
+        
+        let targetX: number;
+        let targetY = basePos.y;
+        
+        if (p.role === 'forward') {
+          // Forwards: only push forward when team is attacking
+          if (ballInOpponentHalf && ballProgress > 50) {
+            // Team is attacking - push forward aggressively
+            targetX = ball.x + dir * 80;
+            
+            // If very close to goal, make runs
+            if (distToGoal < 150) {
+              targetX = ball.x + dir * 60;
+            }
           } else {
-            const aheadBall = (p.position.x * dir) > (ball.x * dir + 30);
-            if (aheadBall) shiftX -= 10 * dir;
+            // Team not attacking - stay near formation position but track ball loosely
+            targetX = basePos.x + (ball.x - this.W / 2) * dir * 0.2;
+          }
+        } else {
+          // Midfielders: more fluid movement, support attack but maintain shape
+          targetX = ball.x + dir * 40; // Less aggressive push
+          
+          if (ballInOpponentHalf) {
+            targetX += dir * 40; // Push up when attacking
           }
         }
-        const targetX = Math.max(0, Math.min(this.W, basePos.x + shiftX));
-        const targetY = Math.max(0, Math.min(this.H, basePos.y + shiftY));
+        
+        // Adjust vertically to create passing options
+        const lateralSpread = 50;
+        targetY += (this.rand() - 0.5) * lateralSpread;
+        
+        // Stay in bounds
+        targetX = Math.max(20, Math.min(this.W - 20, targetX));
+        targetY = Math.max(20, Math.min(this.H - 20, targetY));
+        
+        const dx = targetX - p.position.x;
+        const dy = targetY - p.position.y;
+        const d = Math.hypot(dx, dy) || 1;
+        
+        if (d > 5) {
+          const moveSpeed = baseSpeed * 0.55 * (p.abilities?.speedFactor ?? 1);
+          p.position.x += (dx / d) * moveSpeed;
+          p.position.y += (dy / d) * moveSpeed;
+        }
+      } else {
+        // Shape holders: maintain formation position with intelligent shifts
+        // Players are aware of their base position but can roam when needed
+        const sameSide = ballOwner ? ownerIsTeam1 === this.isTeam1(p) : null;
+        
+        let shiftX = 0;
+        let shiftY = 0;
+        
+        // Contextual positioning based on ball location and team possession
+        if (ballOwner && sameSide !== null) {
+          // Attacking team: push up when ball is forward
+          if (sameSide) {
+            const ballProgress = (ball.x - this.W / 2) * dir;
+            if (ballProgress > 0) {
+              // Ball is in attacking half, push forward
+              shiftX = Math.min(80, ballProgress * 0.3) * dir;
+            }
+            
+            // Stay behind the ball if you're in defense, move up if forward
+            const behindBall = (p.position.x * dir) < (ball.x * dir - 50);
+            if (behindBall && p.role !== 'defender') {
+              shiftX += 40 * dir; // Push forward to support
+            }
+          } else {
+            // Defending team: drop back when opponents attack
+            const ballProgress = (ball.x - this.W / 2) * dir;
+            if (ballProgress < 0) {
+              // Ball is in our half, drop deeper
+              shiftX = Math.max(-60, ballProgress * 0.2) * dir;
+            }
+          }
+          
+          // Horizontal shift toward ball's vertical position
+          shiftY = (ball.y - basePos.y) * 0.15;
+        } else {
+          // Neutral positioning: slight shift toward ball
+          shiftX = (ball.x - this.W / 2) * 0.02 * dir;
+          shiftY = (ball.y - this.H / 2) * 0.03;
+        }
+        
+        const targetX = Math.max(20, Math.min(this.W - 20, basePos.x + shiftX));
+        const targetY = Math.max(20, Math.min(this.H - 20, basePos.y + shiftY));
         const dx = targetX - p.position.x; const dy = targetY - p.position.y; const d = Math.hypot(dx, dy) || 1;
-        if (d > 2) {
-          p.position.x += (dx / d) * baseSpeed * 0.35; p.position.y += (dy / d) * baseSpeed * 0.35;
+        if (d > 3) {
+          p.position.x += (dx / d) * baseSpeed * 0.4; p.position.y += (dy / d) * baseSpeed * 0.4;
         }
       }
       p.position.x = Math.max(0, Math.min(this.W, p.position.x));
       p.position.y = Math.max(0, Math.min(this.H, p.position.y));
     });
 
-    // Loose ball pickup: if no owner and a player is close enough, give possession
+    // Loose ball pickup: prioritize goalkeepers in their own area, then other players
     if (!ballOwner) {
-      for (const p of allPlayers) {
+      // First check if any goalkeeper can reach the ball in their defensive area
+      for (const p of allPlayers.filter(pl => pl.role === 'goalkeeper')) {
+        const dist = Math.hypot(p.position.x - ball.x, p.position.y - ball.y);
+        const isTeam1GK = this.isTeam1(p);
+        const ballInKeepersArea = isTeam1GK ? ball.x < this.W * 0.15 : ball.x > this.W * 0.85;
+        
+        // Goalkeeper can catch ball if it's close and in their defensive area
+        if (dist < 25 && ballInKeepersArea) {
+          this.setBallOwner(p);
+          this.emitEvent('save', this.teamOfPlayer(p).name, p.name, `${p.name} collects the ball!`, {
+            startX: ball.x,
+            startY: ball.y,
+            endX: p.position.x,
+            endY: p.position.y,
+            result: 'collected',
+            subtype: 'goalkeeper_collection',
+            role: 'goalkeeper'
+          });
+          return; // Exit early once keeper has the ball
+        }
+      }
+      
+      // If no goalkeeper caught it, check other players
+      for (const p of allPlayers.filter(pl => pl.role !== 'goalkeeper')) {
         const dist = Math.hypot(p.position.x - ball.x, p.position.y - ball.y);
         if (dist < 8) {
           this.setBallOwner(p);
@@ -580,43 +778,80 @@ export class GameEngineService {
 
   private initializePlayerPositions(): void {
     if (!this.team1 || !this.team2) return;
+    
+    // Realistic football formations with proper spacing
     const formations = [
-      { name: '4-3-3_standard', defX: 0.25, midX: 0.48, fwdX: 0.72, defSpread: 0.50, midSpread: 0.60, fwdSpread: 0.55 },
-      { name: '4-4-2_shape', defX: 0.24, midX: 0.50, fwdX: 0.70, defSpread: 0.52, midSpread: 0.65, fwdSpread: 0.42 },
-      { name: '3-5-2_compact', defX: 0.22, midX: 0.50, fwdX: 0.72, defSpread: 0.60, midSpread: 0.70, fwdSpread: 0.38 },
-      { name: '5-3-2_block', defX: 0.20, midX: 0.46, fwdX: 0.68, defSpread: 0.56, midSpread: 0.55, fwdSpread: 0.34 }
+      { name: '4-3-3', gk: 1, def: 4, mid: 3, fwd: 3, defX: 0.20, midX: 0.45, fwdX: 0.70, defSpread: 0.65, midSpread: 0.50, fwdSpread: 0.60 },
+      { name: '4-4-2', gk: 1, def: 4, mid: 4, fwd: 2, defX: 0.22, midX: 0.50, fwdX: 0.72, defSpread: 0.65, midSpread: 0.70, fwdSpread: 0.35 },
+      { name: '3-5-2', gk: 1, def: 3, mid: 5, fwd: 2, defX: 0.18, midX: 0.50, fwdX: 0.75, defSpread: 0.55, midSpread: 0.75, fwdSpread: 0.35 },
+      { name: '4-2-3-1', gk: 1, def: 4, mid: 5, fwd: 1, defX: 0.22, midX: 0.48, fwdX: 0.78, defSpread: 0.65, midSpread: 0.68, fwdSpread: 0.0 },
+      { name: '3-4-3', gk: 1, def: 3, mid: 4, fwd: 3, defX: 0.18, midX: 0.48, fwdX: 0.72, defSpread: 0.50, midSpread: 0.68, fwdSpread: 0.58 },
+      { name: '5-3-2', gk: 1, def: 5, mid: 3, fwd: 2, defX: 0.20, midX: 0.48, fwdX: 0.70, defSpread: 0.72, midSpread: 0.50, fwdSpread: 0.38 },
+      { name: '4-1-4-1', gk: 1, def: 4, mid: 5, fwd: 1, defX: 0.22, midX: 0.52, fwdX: 0.78, defSpread: 0.65, midSpread: 0.70, fwdSpread: 0.0 }
     ];
-    const pick = () => formations[Math.floor(this.rand() * formations.length)];
+    
     const placeTeam = (team: Team, left: boolean) => {
       const W = environment.gameSettings.fieldWidth;
       const H = environment.gameSettings.fieldHeight;
-      const f = pick();
+      
+      // Pick a random formation for this team
+      const formation = formations[Math.floor(this.rand() * formations.length)];
+      
       const gk = team.players.filter(p => p.role === 'goalkeeper');
       const defs = team.players.filter(p => p.role === 'defender');
       const mids = team.players.filter(p => p.role === 'midfielder');
       const fwds = team.players.filter(p => p.role === 'forward');
+      
+      // Assign players to lines based on formation
       const assignLine = (arr: Player[], depth: number, spread: number) => {
         const cx = depth * W;
         arr.forEach((p, i) => {
           const rel = arr.length === 1 ? 0 : (i / (arr.length - 1) - 0.5);
-          const y = H / 2 + rel * spread * H * 0.5 + (this.rand() - 0.5) * 18;
-          p.position.x = (left ? cx : W - cx) + (this.rand() - 0.5) * 16;
-          p.position.y = Math.max(30, Math.min(H - 30, y));
+          const y = H / 2 + rel * spread * H;
+          p.position.x = (left ? cx : W - cx);
+          p.position.y = Math.max(20, Math.min(H - 20, y));
         });
       };
-      gk.forEach(p => { p.position.x = left ? W * 0.06 : W - W * 0.06; p.position.y = H / 2 + (this.rand() - 0.5) * 30; });
-      assignLine(defs, f.defX, f.defSpread);
-      assignLine(mids, f.midX, f.midSpread);
-      assignLine(fwds, f.fwdX, f.fwdSpread);
+      
+      // Position goalkeeper
+      gk.forEach(p => { 
+        p.position.x = left ? W * 0.06 : W * 0.94; 
+        p.position.y = H / 2; 
+      });
+      
+      // Position outfield players according to formation
+      assignLine(defs, formation.defX, formation.defSpread);
+      assignLine(mids, formation.midX, formation.midSpread);
+      assignLine(fwds, formation.fwdX, formation.fwdSpread);
+      
+      // Ensure players start in their own half
       const mid = W / 2;
       team.players.forEach(p => {
-        if (left && p.position.x > mid - 12) p.position.x = mid - 12;
-        if (!left && p.position.x < mid + 12) p.position.x = mid + 12;
+        if (p.role !== 'goalkeeper') {
+          if (left && p.position.x > mid - 20) p.position.x = mid - 20;
+          if (!left && p.position.x < mid + 20) p.position.x = mid + 20;
+        }
       });
+      
+      // Store formation info for logging
+      console.log(`${team.name} formation: ${formation.name}`);
+      
+      // Return the formation name so we can emit an event
+      return formation.name;
     };
-    placeTeam(this.team1, true);
-    placeTeam(this.team2, false);
-    [...this.team1.players, ...this.team2.players].forEach(p => { (p as any).basePosition = { x: p.position.x, y: p.position.y }; });
+    
+    // Each team gets a random formation independently
+    const team1Formation = placeTeam(this.team1, true);
+    const team2Formation = placeTeam(this.team2, false);
+    
+    // Log formations clearly
+    console.log(`🔷 ${this.team1.name} will play with ${team1Formation} formation`);
+    console.log(`🔶 ${this.team2.name} will play with ${team2Formation} formation`);
+    
+    // Store base positions for each player (their "home" position in formation)
+    [...this.team1.players, ...this.team2.players].forEach(p => { 
+      (p as any).basePosition = { x: p.position.x, y: p.position.y }; 
+    });
   }
 
   /** Expose current mutable team references (used by UI if needed) */
@@ -644,18 +879,40 @@ export class GameEngineService {
     if (!mates.length) return;
     
     // Shooting chance when in attacking position
-    const goalX = dir === 1 ? this.W - 6 : 6;
+    const goalX = dir === 1 ? this.W : 0;
     const distToGoal = Math.abs(goalX - owner.position.x);
     const centerY = this.H / 2;
     const yOffset = Math.abs(owner.position.y - centerY);
     
-    // More aggressive shooting: closer = higher probability, better angles = higher probability
+    // More aggressive shooting: players shoot when they have a reasonable chance
     let shootChance = 0;
-    if (distToGoal < 200 && yOffset < 180) {
-      // Base chance increases as player gets closer and more central
-      shootChance = 0.08 + (200 - distToGoal) / 2000 + (180 - yOffset) / 3600;
-      // Forwards shoot more often
-      if (owner.role === 'forward') shootChance *= 1.5;
+    
+    // Increased shooting range and base probability
+    if (distToGoal < 300) {
+      // Base shooting chance starts higher
+      shootChance = 0.15;
+      
+      // Bonus for being closer to goal (up to +0.25)
+      const distanceBonus = Math.max(0, (300 - distToGoal) / 1200);
+      shootChance += distanceBonus;
+      
+      // Bonus for being more central (up to +0.15)
+      const angleBonus = Math.max(0, (150 - yOffset) / 1000);
+      shootChance += angleBonus;
+      
+      // Role multipliers
+      if (owner.role === 'forward') {
+        shootChance *= 1.8; // Forwards are very eager to shoot
+      } else if (owner.role === 'midfielder') {
+        shootChance *= 1.3; // Midfielders take shots when opportunity arises
+      } else {
+        shootChance *= 0.7; // Defenders are more cautious
+      }
+      
+      // Extra bonus when very close (inside the box ~100 units)
+      if (distToGoal < 100 && yOffset < 100) {
+        shootChance += 0.2;
+      }
     }
     
     if (shootChance > 0 && this.rand() < shootChance) {
@@ -755,11 +1012,61 @@ export class GameEngineService {
   private scoreGoal(scorer: Player): void {
     const gs = this.gameState$.value;
     const score = { ...gs.score };
-    if (this.isTeam1(scorer)) score.team1++; else score.team2++;
+    const scoringTeamIsTeam1 = this.isTeam1(scorer);
+    if (scoringTeamIsTeam1) score.team1++; else score.team2++;
+    
     this.emitEvent('goal', this.teamOfPlayer(scorer).name, scorer.name, undefined, { startX: scorer.position.x, startY: scorer.position.y, endX: scorer.position.x, endY: scorer.position.y, result: 'goal', role: scorer.role });
     this.pendingPass = null;
-    this.gameState$.next({ ...gs, score, ball: { x: this.W / 2, y: this.H / 2, vx: 0, vy: 0 }, currentBallOwner: null });
-    this.restartGraceUntil = Date.now() + 1200;
+    
+    // Reset all players to their base formation positions
+    const allPlayers = [...this.team1!.players, ...this.team2!.players];
+    allPlayers.forEach(p => {
+      const basePos = (p as any).basePosition;
+      if (basePos) {
+        p.position.x = basePos.x;
+        p.position.y = basePos.y;
+      }
+    });
+    
+    // Team that conceded gets the kickoff
+    const kickoffTeam = scoringTeamIsTeam1 ? this.team2! : this.team1!;
+    const kickoffPlayer = kickoffTeam.players.find(p => p.role === 'forward') || kickoffTeam.players[0];
+    
+    if (kickoffPlayer) {
+      // Place kickoff player at center circle
+      kickoffPlayer.position.x = this.W / 2;
+      kickoffPlayer.position.y = this.H / 2;
+      
+      // Lock possession briefly for kickoff
+      this.possessionLockOwner = kickoffPlayer.id;
+      this.possessionLockUntil = Date.now() + 800;
+      
+      this.gameState$.next({ 
+        ...gs, 
+        score, 
+        ball: { x: this.W / 2, y: this.H / 2, vx: 0, vy: 0 }, 
+        currentBallOwner: kickoffPlayer.id 
+      });
+      
+      this.emitEvent('kickoff', kickoffTeam.name, kickoffPlayer.name, `${kickoffTeam.name} kicks off after conceding.`, { 
+        startX: this.W / 2, 
+        startY: this.H / 2, 
+        endX: this.W / 2, 
+        endY: this.H / 2, 
+        result: 'restart', 
+        subtype: 'kickoff' 
+      });
+    } else {
+      // Fallback: just reset ball to center
+      this.gameState$.next({ 
+        ...gs, 
+        score, 
+        ball: { x: this.W / 2, y: this.H / 2, vx: 0, vy: 0 }, 
+        currentBallOwner: null 
+      });
+    }
+    
+    this.restartGraceUntil = Date.now() + 1500;
   }
 
   private getSecondLastDefenderX(defenders: Player[], dir: number): number {
