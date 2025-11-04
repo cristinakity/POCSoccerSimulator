@@ -52,13 +52,17 @@ export class GameEngineService {
     startTime: number; duration: number; type: string; shot?: boolean; xg?: number;
   } | null = null;
   private lastPassTime = 0;
-  private passCooldownMs = 800; // Faster passing cooldown (was 1400ms)
+  private passCooldownMs = 1000; // Realistic passing rhythm (was 800, originally 1400ms)
   private momentumCounter = 0;
   private halfSwitched = false;
   // Kickoff / possession tracking additions
   private possessionLockOwner: string | null = null;
   private possessionLockUntil = 0;
   private possessionStartTime = 0;
+  
+  // Logging throttle
+  private lastBallLogTime = 0;
+  private ballLogIntervalMs = 500; // Log ball position every 500ms
 
   // Fouls & cards control
   private lastFoulTime = 0;
@@ -122,11 +126,17 @@ export class GameEngineService {
 
     const kickoffPlayer = this.findKickoffPlayer(coinWinner, fieldWidth, fieldHeight);
     if (kickoffPlayer) {
-      // Place kickoff player at center circle
-      kickoffPlayer.position.x = fieldWidth / 2;
-      kickoffPlayer.position.y = fieldHeight / 2;
+      // Place kickoff player at center circle (exact middle of field)
+      const centerX = fieldWidth / 2;
+      const centerY = fieldHeight / 2;
+      kickoffPlayer.position.x = centerX;
+      kickoffPlayer.position.y = centerY;
+      
+      console.log(`⚽ KICKOFF: ${kickoffPlayer.name} at center (${centerX}, ${centerY})`);
+      
       this.gameState$.next({
         ...this.gameState$.value,
+        ball: { x: centerX, y: centerY, vx: 0, vy: 0 }, // Ensure ball is at exact center
         currentBallOwner: kickoffPlayer.id,
         phase: 'kickoff',
       });
@@ -306,7 +316,13 @@ export class GameEngineService {
         y = owner.position.y; 
         vx = 0; 
         vy = 0;
-        console.log(`⚽ Ball with ${owner.name} at (${x.toFixed(0)}, ${y.toFixed(0)})`);
+        
+        // Log ball position periodically (not every frame)
+        const now = Date.now();
+        if (now - this.lastBallLogTime >= this.ballLogIntervalMs) {
+          console.log(`⚽ Ball with ${owner.name} (${owner.role}) at (${x.toFixed(0)}, ${y.toFixed(0)})`);
+          this.lastBallLogTime = now;
+        }
       }
       this.gameState$.next({ ...gs, ball: { x, y, vx, vy } });
     } else {
@@ -318,9 +334,40 @@ export class GameEngineService {
       x = Math.max(0, Math.min(this.W, x));
       y = Math.max(0, Math.min(this.H, y));
       
-      // Log ball position when it's loose
-      const speed = Math.hypot(vx, vy);
-      console.log(`⚽ Ball LOOSE at (${x.toFixed(0)}, ${y.toFixed(0)}) | Speed: ${speed.toFixed(1)} | Velocity: (${vx.toFixed(1)}, ${vy.toFixed(1)})`);
+      // CRITICAL: Check if goalkeeper can collect the ball BEFORE checking for goals
+      // This prevents balls from going through when GK is close
+      const allPlayers = [...(this.team1?.players || []), ...(this.team2?.players || [])];
+      for (const p of allPlayers.filter(pl => pl.role === 'goalkeeper')) {
+        const dist = Math.hypot(p.position.x - x, p.position.y - y);
+        const isTeam1GK = this.isTeam1(p);
+        const ballInKeepersArea = isTeam1GK ? x < this.W * 0.15 : x > this.W * 0.85;
+        
+        // Goalkeeper can catch ball if it's close and in their defensive area
+        if (dist < 25 && ballInKeepersArea) {
+          console.log(`🧤 GK ${p.name}: COLLECTED loose ball at distance ${dist.toFixed(1)} - PREVENTED GOAL!`);
+          this.setBallOwner(p);
+          this.emitEvent('save', this.teamOfPlayer(p).name, p.name, `${p.name} collects the ball!`, {
+            startX: x,
+            startY: y,
+            endX: p.position.x,
+            endY: p.position.y,
+            result: 'collected',
+            subtype: 'goalkeeper_collection',
+            role: 'goalkeeper'
+          });
+          // Stop the ball where it is - keeper will move to it naturally
+          this.gameState$.next({ ...gs, ball: { x, y, vx: 0, vy: 0 }, currentBallOwner: p.id });
+          return; // Exit early - ball is collected, don't check for goals
+        }
+      }
+      
+      // Log loose ball position periodically
+      const now = Date.now();
+      if (now - this.lastBallLogTime >= this.ballLogIntervalMs) {
+        const speed = Math.hypot(vx, vy);
+        console.log(`⚽ Ball LOOSE at (${x.toFixed(0)}, ${y.toFixed(0)}) - Speed: ${speed.toFixed(1)}`);
+        this.lastBallLogTime = now;
+      }
       
       // Throw-in detection
       if (y <= 5 || y >= this.H - 5) { this.handleThrowIn(x, y); return; }
@@ -378,20 +425,21 @@ export class GameEngineService {
     // Players will keep the ball until they pass it or lose it to opponents
     // The natural passing system handles ball movement without visual glitches
 
-    // Pressers: when ball is owned, limit to 2 defenders; when loose, pick closest 3 from all players
+    // Pressers: when ball is owned, defenders actively challenge; when loose, pick closest from all players
     let pressers: Player[] = [];
     if (ballOwner && defendingTeam) {
+      // Increase defensive pressure from 2 to 3 defenders to make attacks harder
       pressers = defendingTeam.players.filter(p => p.role !== 'goalkeeper')
         .map(p => ({ p, d: Math.hypot(p.position.x - ball.x, p.position.y - ball.y) }))
         .sort((a, b) => a.d - b.d)
-        .slice(0, 2)
+        .slice(0, 3) // was 2, now 3 defenders press
         .map(o => o.p);
     } else if (!ballOwner) {
-      // Loose ball: closest 3 players from both teams chase
+      // Loose ball: closest 4 players from both teams chase (more competitive)
       pressers = allPlayers.filter(p => p.role !== 'goalkeeper')
         .map(p => ({ p, d: Math.hypot(p.position.x - ball.x, p.position.y - ball.y) }))
         .sort((a, b) => a.d - b.d)
-        .slice(0, 3)
+        .slice(0, 4) // was 3, now 4 for more intense loose ball battles
         .map(o => o.p);
     }
 
@@ -467,8 +515,13 @@ export class GameEngineService {
             // Track ball position with heavy smoothing - stay centered but ready
             const trackingInfluence = threatLevel * 0.5;
             targetY = this.H / 2 + (ball.y - this.H / 2) * trackingInfluence;
-            if (threatLevel > 0.7) {
-              console.log(`🧤 GK ${p.name}: TRACKING ball - Threat level ${(threatLevel * 100).toFixed(0)}%`);
+            
+            // Log at high threat levels (>90%)
+            if (threatLevel > 0.9) {
+              const now = Date.now();
+              if (now - this.lastBallLogTime >= this.ballLogIntervalMs) {
+                console.log(`🧤 GK ${p.name}: HIGH ALERT - Threat ${(threatLevel * 100).toFixed(0)}%`);
+              }
             }
           } else {
             // When ball is far away, return to center of goal
@@ -570,43 +623,47 @@ export class GameEngineService {
           p.position.y += (dy / d) * moveSpeed;
         }
       } else {
-        // Shape holders: maintain formation position with intelligent shifts
-        // Players are aware of their base position but can roam when needed
+        // Shape holders: maintain formation position with MINIMAL shifts
+        // Keep formation integrity - defenders stay back, forwards stay forward
         const sameSide = ballOwner ? ownerIsTeam1 === this.isTeam1(p) : null;
         
         let shiftX = 0;
         let shiftY = 0;
         
+        // Role-based shift limits to maintain formation separation
+        const maxShiftByRole = {
+          'defender': 25,      // Defenders stay mostly in position
+          'midfielder': 40,     // Midfielders can roam moderately  
+          'forward': 35,        // Forwards maintain attacking position
+          'goalkeeper': 0       // GK handled separately above
+        };
+        
+        const maxShift = maxShiftByRole[p.role as keyof typeof maxShiftByRole] || 30;
+        
         // Contextual positioning based on ball location and team possession
         if (ballOwner && sameSide !== null) {
-          // Attacking team: push up when ball is forward
+          // Attacking team: slight push up when ball is forward
           if (sameSide) {
             const ballProgress = (ball.x - this.W / 2) * dir;
-            if (ballProgress > 0) {
-              // Ball is in attacking half, push forward
-              shiftX = Math.min(80, ballProgress * 0.3) * dir;
-            }
-            
-            // Stay behind the ball if you're in defense, move up if forward
-            const behindBall = (p.position.x * dir) < (ball.x * dir - 50);
-            if (behindBall && p.role !== 'defender') {
-              shiftX += 40 * dir; // Push forward to support
+            if (ballProgress > 0 && p.role !== 'defender') {
+              // Ball is in attacking half, slight push forward (only mids/forwards)
+              shiftX = Math.min(maxShift, ballProgress * 0.15) * dir;
             }
           } else {
-            // Defending team: drop back when opponents attack
+            // Defending team: slight drop back when opponents attack
             const ballProgress = (ball.x - this.W / 2) * dir;
-            if (ballProgress < 0) {
-              // Ball is in our half, drop deeper
-              shiftX = Math.max(-60, ballProgress * 0.2) * dir;
+            if (ballProgress < 0 && p.role === 'defender') {
+              // Ball is in our half, slight drop deeper (only defenders)
+              shiftX = Math.max(-maxShift, ballProgress * 0.12) * dir;
             }
           }
           
-          // Horizontal shift toward ball's vertical position
-          shiftY = (ball.y - basePos.y) * 0.15;
+          // Minimal horizontal shift toward ball's vertical position
+          shiftY = (ball.y - basePos.y) * 0.12;
         } else {
-          // Neutral positioning: slight shift toward ball
-          shiftX = (ball.x - this.W / 2) * 0.02 * dir;
-          shiftY = (ball.y - this.H / 2) * 0.03;
+          // Neutral positioning: very slight shift toward ball
+          shiftX = (ball.x - this.W / 2) * 0.01 * dir;
+          shiftY = (ball.y - this.H / 2) * 0.02;
         }
         
         const targetX = Math.max(20, Math.min(this.W - 20, basePos.x + shiftX));
@@ -779,14 +836,40 @@ export class GameEngineService {
   private initializePlayerPositions(): void {
     if (!this.team1 || !this.team2) return;
     
-    // Formation templates with CLEAR SEPARATION between 3 lines
+    // Realistic formation templates with proper tactical positioning
+    // defX/midX/fwdX = depth from own goal (0=goal, 1=opponent goal)
+    // defSpread/midSpread/fwdSpread = vertical spread (0-1 as fraction of field height)
+    // ENSURE minimum 30% gap between each line for clear visual separation
     const formations = [
-      { name: '4-3-3', defX: 0.20, midX: 0.50, fwdX: 0.75, defSpread: 0.55, midSpread: 0.40, fwdSpread: 0.50 },
-      { name: '4-4-2', defX: 0.20, midX: 0.50, fwdX: 0.78, defSpread: 0.55, midSpread: 0.60, fwdSpread: 0.25 },
-      { name: '3-5-2', defX: 0.18, midX: 0.50, fwdX: 0.78, defSpread: 0.40, midSpread: 0.65, fwdSpread: 0.25 },
-      { name: '4-2-3-1', defX: 0.20, midX: 0.55, fwdX: 0.82, defSpread: 0.55, midSpread: 0.55, fwdSpread: 0.0 },
-      { name: '3-4-3', defX: 0.18, midX: 0.50, fwdX: 0.75, defSpread: 0.40, midSpread: 0.58, fwdSpread: 0.50 },
-      { name: '5-3-2', defX: 0.20, midX: 0.52, fwdX: 0.78, defSpread: 0.62, midSpread: 0.40, fwdSpread: 0.25 }
+      // 4-3-3: Balanced formation with strong midfield control
+      { name: '4-3-3', defX: 0.20, midX: 0.50, fwdX: 0.78, defSpread: 0.58, midSpread: 0.42, fwdSpread: 0.52 },
+      
+      // 4-4-2: Classic structured formation
+      { name: '4-4-2', defX: 0.20, midX: 0.50, fwdX: 0.78, defSpread: 0.58, midSpread: 0.62, fwdSpread: 0.28 },
+      
+      // 3-5-2: Midfield dominance with wing backs
+      { name: '3-5-2', defX: 0.18, midX: 0.50, fwdX: 0.78, defSpread: 0.42, midSpread: 0.68, fwdSpread: 0.28 },
+      
+      // 4-2-3-1: Possession-based with playmaker (defensive mid deep, attacking mid high)
+      { name: '4-2-3-1', defX: 0.20, midX: 0.38, fwdX: 0.75, defSpread: 0.58, midSpread: 0.50, fwdSpread: 0.15 },
+      
+      // 3-4-3: Attacking formation with width
+      { name: '3-4-3', defX: 0.18, midX: 0.48, fwdX: 0.78, defSpread: 0.42, midSpread: 0.60, fwdSpread: 0.55 },
+      
+      // 5-3-2: Defensive/counter-attacking formation
+      { name: '5-3-2', defX: 0.20, midX: 0.50, fwdX: 0.78, defSpread: 0.65, midSpread: 0.42, fwdSpread: 0.28 },
+      
+      // 4-1-4-1: Defensive with lone striker
+      { name: '4-1-4-1', defX: 0.20, midX: 0.50, fwdX: 0.80, defSpread: 0.58, midSpread: 0.60, fwdSpread: 0.10 },
+      
+      // 3-4-2-1: Creative attacking with playmakers
+      { name: '3-4-2-1', defX: 0.18, midX: 0.45, fwdX: 0.75, defSpread: 0.42, midSpread: 0.58, fwdSpread: 0.12 },
+      
+      // 4-2-2-2: Direct attacking with twin strikers
+      { name: '4-2-2-2', defX: 0.20, midX: 0.42, fwdX: 0.75, defSpread: 0.58, midSpread: 0.48, fwdSpread: 0.30 },
+      
+      // 4-5-1: Defensive with compact midfield
+      { name: '4-5-1', defX: 0.20, midX: 0.50, fwdX: 0.80, defSpread: 0.58, midSpread: 0.68, fwdSpread: 0.10 }
     ];
     
     const placeTeam = (team: Team, left: boolean) => {
@@ -851,19 +934,17 @@ export class GameEngineService {
         }
       });
       
-      // Build actual formation string based on player count
-      const actualFormation = `${defs.length}-${mids.length}-${fwds.length}`;
-      
-      return actualFormation;
+      // Return the formation template name (shows tactical setup, not just player count)
+      return formation.name;
     };
     
     // Each team gets a random formation template independently
     const team1Formation = placeTeam(this.team1, true);
     const team2Formation = placeTeam(this.team2, false);
     
-    // Log formations clearly
-    console.log(`🔷 ${this.team1.name} will play ${team1Formation} formation`);
-    console.log(`🔶 ${this.team2.name} will play ${team2Formation} formation`);
+    // Log formations clearly with template names
+    console.log(`🔷 ${this.team1.name} playing ${team1Formation} formation`);
+    console.log(`🔶 ${this.team2.name} playing ${team2Formation} formation`);
     
     // Store base positions for each player (their "home" position in formation)
     [...this.team1.players, ...this.team2.players].forEach(p => { 
@@ -1050,9 +1131,13 @@ export class GameEngineService {
     const kickoffPlayer = kickoffTeam.players.find(p => p.role === 'forward') || kickoffTeam.players[0];
     
     if (kickoffPlayer) {
-      // Place kickoff player at center circle
-      kickoffPlayer.position.x = this.W / 2;
-      kickoffPlayer.position.y = this.H / 2;
+      // Place kickoff player at exact center of field
+      const centerX = this.W / 2;
+      const centerY = this.H / 2;
+      kickoffPlayer.position.x = centerX;
+      kickoffPlayer.position.y = centerY;
+      
+      console.log(`⚽ KICKOFF after goal: ${kickoffPlayer.name} at center (${centerX}, ${centerY})`);
       
       // Lock possession briefly for kickoff
       this.possessionLockOwner = kickoffPlayer.id;
@@ -1061,15 +1146,15 @@ export class GameEngineService {
       this.gameState$.next({ 
         ...gs, 
         score, 
-        ball: { x: this.W / 2, y: this.H / 2, vx: 0, vy: 0 }, 
+        ball: { x: centerX, y: centerY, vx: 0, vy: 0 }, 
         currentBallOwner: kickoffPlayer.id 
       });
       
       this.emitEvent('kickoff', kickoffTeam.name, kickoffPlayer.name, `${kickoffTeam.name} kicks off after conceding.`, { 
-        startX: this.W / 2, 
-        startY: this.H / 2, 
-        endX: this.W / 2, 
-        endY: this.H / 2, 
+        startX: centerX, 
+        startY: centerY, 
+        endX: centerX, 
+        endY: centerY, 
         result: 'restart', 
         subtype: 'kickoff' 
       });
