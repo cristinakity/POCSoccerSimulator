@@ -221,10 +221,44 @@ export class GameEngineService {
       if (t >= 1) {
         if (p.shot) {
           if (this.isGoal(x, y)) {
-            this.scoreGoal(p.passer);
-            this.pendingPass = null;
-            // scoreGoal handles ball reset
-            return;
+            // Shot is on target - check for goalkeeper save
+            const shooterTeam = this.isTeam1(p.passer) ? this.team1! : this.team2!;
+            const defendingTeam = shooterTeam === this.team1 ? this.team2! : this.team1!;
+            const keeper = defendingTeam.players.find(pl => pl.role === 'goalkeeper');
+            
+            let saved = false;
+            if (keeper) {
+              const distToShot = Math.hypot(keeper.position.x - x, keeper.position.y - y);
+              const xg = p.xg ?? 0.5;
+              // Save probability: closer keeper + lower xG = higher save chance
+              const baseSaveChance = 0.4; // 40% base
+              const distBonus = Math.max(0, (80 - distToShot) / 200); // up to +40% if very close
+              const xgPenalty = xg * 0.5; // harder shots reduce save chance
+              const saveChance = Math.min(0.85, baseSaveChance + distBonus - xgPenalty);
+              
+              if (this.rand() < saveChance) {
+                saved = true;
+                this.emitEvent('save', defendingTeam.name, keeper.name, `${keeper.name} saves the shot!`, { 
+                  startX: x, startY: y, endX: keeper.position.x, endY: keeper.position.y, 
+                  result: 'saved', subtype: 'goalkeeper_save', role: 'goalkeeper' 
+                });
+                // Ball becomes loose near keeper
+                x = keeper.position.x + (this.rand() - 0.5) * 20;
+                y = keeper.position.y + (this.rand() - 0.5) * 20;
+                vx = (this.rand() - 0.5) * 2;
+                vy = (this.rand() - 0.5) * 2;
+                this.pendingPass = null;
+                this.gameState$.next({ ...gs, ball: { x, y, vx, vy }, currentBallOwner: null });
+                return;
+              }
+            }
+            
+            if (!saved) {
+              this.scoreGoal(p.passer);
+              this.pendingPass = null;
+              // scoreGoal handles ball reset
+              return;
+            }
           } else {
             this.emitEvent('shot', this.teamOfPlayer(p.passer).name, p.passer.name);
             // Missed shot: ball becomes loose at end position with reduced velocity
@@ -237,13 +271,15 @@ export class GameEngineService {
         }
         // Pass completed: ball arrives at destination, becomes loose
         // Target player will pick it up automatically if close enough (handled in updatePlayerPositions)
+        const passType = p.type;
         this.pendingPass = null;
         vx *= 0.2; // slow down for easier pickup
         vy *= 0.2;
         // Check if target is close enough to receive immediately
         const distToTarget = Math.hypot(p.target.position.x - x, p.target.position.y - y);
         if (distToTarget < 15) {
-          // Target is close, give them the ball
+          // Target is close, give them the ball and emit completed pass
+          this.emitEvent('pass', this.teamOfPlayer(p.target).name, p.target.name, `${p.passer.name} completes ${passType} to ${p.target.name}`, { startX: p.startX, startY: p.startY, endX: x, endY: y, subtype: passType, result: 'complete', role: p.target.role });
           this.setBallOwner(p.target);
           x = p.target.position.x;
           y = p.target.position.y;
@@ -352,7 +388,19 @@ export class GameEngineService {
       const isOwner = !!ballOwner && p.id === ballOwner.id;
       const dir = this.isTeam1(p) ? 1 : -1;
       const basePos = (p as any).basePosition || { x: p.position.x, y: p.position.y };
-      if (isOwner) {
+      
+      // Goalkeeper special logic: stay near goal line and track ball vertically
+      if (p.role === 'goalkeeper') {
+        const goalX = dir === 1 ? this.W * 0.06 : this.W * 0.94;
+        const targetY = Math.max(this.H * 0.3, Math.min(this.H * 0.7, ball.y));
+        const dx = goalX - p.position.x;
+        const dy = targetY - p.position.y;
+        const d = Math.hypot(dx, dy) || 1;
+        if (d > 1) {
+          p.position.x += (dx / d) * baseSpeed * 0.4;
+          p.position.y += (dy / d) * baseSpeed * 0.6; // faster vertical tracking
+        }
+      } else if (isOwner) {
         // Dribbler: smooth forward advance with minimal lateral noise
         const staminaFactor = p.abilities?.stamina && p.abilities?.maxStamina ? Math.max(0.6, p.abilities.stamina / p.abilities.maxStamina) : 1;
         const speedFactor = Math.min(1.2, (p.abilities?.speedFactor ?? 1) * staminaFactor);
@@ -656,6 +704,8 @@ export class GameEngineService {
     const arrivalTime = dist / speed;
     const interceptor = this.findInterceptor(startX, startY, endX, endY, opponents, arrivalTime, environment.gameSettings.speed.playerBase);
     if (interceptor && Date.now() > this.restartGraceUntil) {
+      // Emit attempted pass first, then interception
+      this.emitEvent('pass', this.teamOfPlayer(passer).name, passer.name, undefined, { startX, startY, endX, endY, subtype: this.classifyPassType(passer, target), result: 'intercepted', role: passer.role });
       this.emitEvent('interception', this.teamOfPlayer(interceptor).name, interceptor.name, undefined, { startX, startY, endX: interceptor.position.x, endY: interceptor.position.y, result: 'intercepted', subtype: 'interception', role: interceptor.role });
       this.setBallOwner(interceptor);
       this.lastTouchTeam = this.isTeam1(interceptor) ? 'team1' : 'team2';
@@ -784,10 +834,15 @@ export class GameEngineService {
       const clamp = Math.max(0, Math.min(1, t));
       const px = x0 + (x1 - x0) * clamp; const py = y0 + (y1 - y0) * clamp;
       const corridorDist = Math.hypot(o.position.x - px, o.position.y - py);
-      if (corridorDist > 40) return;
-      const oppSpeed = baseSpeed * (o.abilities?.speedFactor ?? 1);
+      // Only consider interception if very close to pass line
+      if (corridorDist > 20) return;
+      const oppSpeed = baseSpeed * (o.abilities?.speedFactor ?? 1) * 1.3; // slight speed boost for interception sprint
       const travel = corridorDist / (oppSpeed + 0.01);
-      if (travel < ballArrival * 0.85 && travel < bestLead) { bestLead = travel; best = o; }
+      // Much stricter: need to arrive significantly before ball (50% of arrival time) and add random chance
+      if (travel < ballArrival * 0.5 && travel < bestLead && Math.random() < 0.3) { 
+        bestLead = travel; 
+        best = o; 
+      }
     });
     return best;
   }
