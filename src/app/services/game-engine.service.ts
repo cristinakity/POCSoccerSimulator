@@ -62,7 +62,7 @@ export class GameEngineService {
   
   // Logging throttle
   private lastBallLogTime = 0;
-  private ballLogIntervalMs = 500; // Log ball position every 500ms
+  private ballLogIntervalMs = 150; // Log ball position every 150ms (was 500ms) for smoother tracking
 
   // Fouls & cards control
   private lastFoulTime = 0;
