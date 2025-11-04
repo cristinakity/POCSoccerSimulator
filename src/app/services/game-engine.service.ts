@@ -52,7 +52,7 @@ export class GameEngineService {
     startTime: number; duration: number; type: string; shot?: boolean; xg?: number;
   } | null = null;
   private lastPassTime = 0;
-  private passCooldownMs = 1400;
+  private passCooldownMs = 800; // Faster passing cooldown (was 1400ms)
   private momentumCounter = 0;
   private halfSwitched = false;
   // Kickoff / possession tracking additions
@@ -305,7 +305,8 @@ export class GameEngineService {
         x = owner.position.x; 
         y = owner.position.y; 
         vx = 0; 
-        vy = 0; 
+        vy = 0;
+        console.log(`⚽ Ball with ${owner.name} at (${x.toFixed(0)}, ${y.toFixed(0)})`);
       }
       this.gameState$.next({ ...gs, ball: { x, y, vx, vy } });
     } else {
@@ -316,6 +317,11 @@ export class GameEngineService {
       if (Math.abs(vx) < 0.02) vx = 0; if (Math.abs(vy) < 0.02) vy = 0;
       x = Math.max(0, Math.min(this.W, x));
       y = Math.max(0, Math.min(this.H, y));
+      
+      // Log ball position when it's loose
+      const speed = Math.hypot(vx, vy);
+      console.log(`⚽ Ball LOOSE at (${x.toFixed(0)}, ${y.toFixed(0)}) | Speed: ${speed.toFixed(1)} | Velocity: (${vx.toFixed(1)}, ${vy.toFixed(1)})`);
+      
       // Throw-in detection
       if (y <= 5 || y >= this.H - 5) { this.handleThrowIn(x, y); return; }
       // Goal / corner / goal kick logic
@@ -368,21 +374,9 @@ export class GameEngineService {
     const attackingTeam = ownerIsTeam1 == null ? null : (ownerIsTeam1 ? this.team1! : this.team2!);
     const defendingTeam = ownerIsTeam1 == null ? null : (ownerIsTeam1 ? this.team2! : this.team1!);
 
-    // Smart ball handoff: check if a teammate is closer to the ball than current owner
-    if (ballOwner && attackingTeam) {
-      const closestTeammate = attackingTeam.players
-        .filter(p => p.id !== ballOwner.id && p.role !== 'goalkeeper')
-        .map(p => ({ p, d: Math.hypot(p.position.x - ball.x, p.position.y - ball.y) }))
-        .sort((a, b) => a.d - b.d)[0];
-      
-      const ownerDist = Math.hypot(ballOwner.position.x - ball.x, ballOwner.position.y - ball.y);
-      
-      // Handoff if teammate is significantly closer (at least 15 units closer and within 12 units of ball)
-      if (closestTeammate && closestTeammate.d < ownerDist - 15 && closestTeammate.d < 12) {
-        this.setBallOwner(closestTeammate.p);
-        return; // Exit early to update with new owner next frame
-      }
-    }
+    // DISABLED: Smart ball handoff causes teleportation since ball snaps to new owner's position
+    // Players will keep the ball until they pass it or lose it to opponents
+    // The natural passing system handles ball movement without visual glitches
 
     // Pressers: when ball is owned, limit to 2 defenders; when loose, pick closest 3 from all players
     let pressers: Player[] = [];

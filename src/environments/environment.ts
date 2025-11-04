@@ -13,18 +13,18 @@ export const environment = {
     penaltySpotDistM: 11,
     centerCircleRadiusM: 9.15,
     speed: {
-      playerBase: 3.2,       // faster general movement
-      chaseExtra: 1.6,       // more intense ball pursuit
-      passSpeed: 20,         // zippier passes
-      shotSpeed: 26,         // stronger shots
-      maxBallSpeed: 32,      // allow faster peak speed
-      frictionPossessed: 0.994, // keep dribbles lively
-      frictionFree: 0.988    // ball slows a bit slower than before
+      playerBase: 5.0,       // faster general movement (was 3.2)
+      chaseExtra: 2.5,       // more intense ball pursuit (was 1.6)
+      passSpeed: 28,         // zippier passes (was 20)
+      shotSpeed: 35,         // stronger shots (was 26)
+      maxBallSpeed: 42,      // allow faster peak speed (was 32)
+      frictionPossessed: 0.992, // keep dribbles lively (was 0.994)
+      frictionFree: 0.985    // ball slows a bit faster for more control (was 0.988)
     },
     playerSize: 12,
     ballSize: 8,
     experimentalBounce: false, // when true, ball will bounce off boundaries instead of triggering throw-ins (non-official soccer)
-    decisionIntervalMs: 110, // AI decision cadence (ms)
+    decisionIntervalMs: 70, // AI decision cadence (ms) - faster decisions (was 110)
     randomSeed: null as number | null, // set to a number for deterministic simulation
     ballDecayFree: 0.985, // decay applied each frame when ball free (overrides frictionFree if set)
     ballDecayPossessed: 0.994, // decay when dribbling (matches frictionPossessed by default)
