@@ -246,6 +246,7 @@ export class GameEngineService {
               
               if (this.rand() < saveChance) {
                 saved = true;
+                console.log(`🧤 GK ${keeper.name}: SAVED shot! Save chance: ${(saveChance * 100).toFixed(0)}%, Distance: ${distToShot.toFixed(1)}, xG: ${xg.toFixed(2)}`);
                 this.emitEvent('save', defendingTeam.name, keeper.name, `${keeper.name} saves the shot!`, { 
                   startX: x, startY: y, endX: keeper.position.x, endY: keeper.position.y, 
                   result: 'saved', subtype: 'goalkeeper_save', role: 'goalkeeper' 
@@ -453,6 +454,7 @@ export class GameEngineService {
         
         if (!ballOwner && ballInKeepersArea && distToBall < 30) {
           // Rush toward the loose ball to collect it
+          console.log(`🧤 GK ${p.name}: RUSHING to collect loose ball! Distance: ${distToBall.toFixed(1)}`);
           targetX = p.position.x + (ball.x - p.position.x) * 0.7;
           targetY = p.position.y + (ball.y - p.position.y) * 0.7;
           
@@ -471,6 +473,9 @@ export class GameEngineService {
             // Track ball position with heavy smoothing - stay centered but ready
             const trackingInfluence = threatLevel * 0.5;
             targetY = this.H / 2 + (ball.y - this.H / 2) * trackingInfluence;
+            if (threatLevel > 0.7) {
+              console.log(`🧤 GK ${p.name}: TRACKING ball - Threat level ${(threatLevel * 100).toFixed(0)}%`);
+            }
           } else {
             // When ball is far away, return to center of goal
             targetY = this.H / 2;
@@ -631,6 +636,7 @@ export class GameEngineService {
         
         // Goalkeeper can catch ball if it's close and in their defensive area
         if (dist < 25 && ballInKeepersArea) {
+          console.log(`🧤 GK ${p.name}: COLLECTED loose ball at distance ${dist.toFixed(1)}`);
           this.setBallOwner(p);
           this.emitEvent('save', this.teamOfPlayer(p).name, p.name, `${p.name} collects the ball!`, {
             startX: ball.x,
@@ -811,10 +817,11 @@ export class GameEngineService {
           return;
         }
         
-        // For left team: depth increases toward opponent (0 = own goal, 1 = opponent goal)
-        // For right team: depth increases toward opponent (1 = own goal, 0 = opponent goal)
-        const cx = depth * W;
-        const actualX = left ? cx : W - cx;
+        // For left team (attacking right): depth 0 = own goal (x=0), depth 1 = opponent goal (x=W)
+        // For right team (attacking left): depth 0 = own goal (x=W), depth 1 = opponent goal (x=0)
+        // So: left uses depth directly, right uses (1-depth) to mirror
+        const adjustedDepth = left ? depth : (1 - depth);
+        const actualX = adjustedDepth * W;
         console.log(`➡️ Positioning ${lineName}: ${arr.length} players at X=${actualX.toFixed(0)} (depth=${depth}, side=${left ? 'LEFT' : 'RIGHT'})`);
         
         arr.forEach((p, i) => {
