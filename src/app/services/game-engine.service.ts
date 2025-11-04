@@ -236,6 +236,13 @@ export class GameEngineService {
       // Rough velocity estimate
       vx = (p.endX - p.startX) / (p.duration / 1000);
       vy = (p.endY - p.startY) / (p.duration / 1000);
+      // Adaptive higher-frequency logging during fast passes to reduce perceived teleportation
+      const nowLog = Date.now();
+      const passLogInterval = 60; // ms while ball is mid-flight
+      if (nowLog - this.lastBallLogTime >= passLogInterval) {
+        console.log(`➡️ Pass flight t=${(t*100).toFixed(0)}% at (${x.toFixed(0)},${y.toFixed(0)})`);
+        this.lastBallLogTime = nowLog;
+      }
       if (t >= 1) {
         if (p.shot) {
           if (this.isGoal(x, y)) {
@@ -311,16 +318,44 @@ export class GameEngineService {
 
     if (gs.currentBallOwner) {
       const owner = this.findPlayer(gs.currentBallOwner);
-      if (owner) { 
-        x = owner.position.x; 
-        y = owner.position.y; 
-        vx = 0; 
-        vy = 0;
-        
+      if (owner) {
+        // Instead of snapping ball directly to owner's exact position (which looks like teleportation
+        // right after a pass is received), smoothly ease the ball toward the owner's feet.
+        // This creates a "first touch" animation and eliminates visual popping.
+        const targetX = owner.position.x;
+        const targetY = owner.position.y;
+
+        const dxOwner = targetX - x;
+        const dyOwner = targetY - y;
+        const distToOwner = Math.hypot(dxOwner, dyOwner);
+
+        if (distToOwner < 1.2) {
+          // Close enough – snap to reduce jitter
+          x = targetX;
+          y = targetY;
+          vx = 0;
+          vy = 0;
+        } else {
+          // Ease factor scales with distance so long receptions feel a bit quicker
+          // but still visibly smooth. Clamp so we never overshoot.
+          const easeBase = 0.38;          // minimum follow factor
+          const easeScale = 0.42;         // additional factor from distance
+          const normalized = Math.min(1, distToOwner / 22); // distance normalization
+          const ease = easeBase + easeScale * normalized;   // final easing multiplier
+
+          // Apply easing movement
+          x += dxOwner * ease;
+          y += dyOwner * ease;
+
+          // Derive pseudo velocity (useful if later we add spin/deflections)
+          vx = dxOwner * ease * 60 / 1000; // scaled per second (approx)
+          vy = dyOwner * ease * 60 / 1000;
+        }
+
         // Log ball position periodically (not every frame)
         const now = Date.now();
         if (now - this.lastBallLogTime >= this.ballLogIntervalMs) {
-          console.log(`⚽ Ball with ${owner.name} (${owner.role}) at (${x.toFixed(0)}, ${y.toFixed(0)})`);
+          console.log(`⚽ Ball with ${owner.name} (${owner.role}) easing to (${x.toFixed(0)}, ${y.toFixed(0)}) dist=${distToOwner.toFixed(1)}`);
           this.lastBallLogTime = now;
         }
       }
@@ -679,6 +714,16 @@ export class GameEngineService {
 
     // Loose ball pickup: prioritize goalkeepers in their own area, then other players
     if (!ballOwner) {
+      // Gate ball pickup during early phase of a pass to avoid premature owner assignment that creates large easing jumps
+      let passPickupAllowed = true;
+      let passTargetId: string | null = null;
+      if (this.pendingPass) {
+        const p = this.pendingPass;
+        const t = Math.min(1, (Date.now() - p.startTime) / p.duration);
+        // Only allow pickup after 70% of flight OR if receiver is very close (<12px)
+        passPickupAllowed = t >= 0.7;
+        passTargetId = p.target.id;
+      }
       // First check if any goalkeeper can reach the ball in their defensive area
       for (const p of allPlayers.filter(pl => pl.role === 'goalkeeper')) {
         const dist = Math.hypot(p.position.x - ball.x, p.position.y - ball.y);
@@ -706,8 +751,16 @@ export class GameEngineService {
       for (const p of allPlayers.filter(pl => pl.role !== 'goalkeeper')) {
         const dist = Math.hypot(p.position.x - ball.x, p.position.y - ball.y);
         if (dist < 8) {
-          this.setBallOwner(p);
-          break;
+          if (!this.pendingPass || passPickupAllowed || p.id === passTargetId) {
+            // If it's the intended receiver and we're earlier than 70%, finalize pass early
+            if (this.pendingPass && p.id === passTargetId) {
+              const pass = this.pendingPass;
+              this.emitEvent('pass', this.teamOfPlayer(pass.target).name, pass.target.name, `${pass.passer.name} (early control) ${pass.type} to ${pass.target.name}`, { startX: pass.startX, startY: pass.startY, endX: ball.x, endY: ball.y, subtype: pass.type, result: 'complete', role: pass.target.role });
+              this.pendingPass = null;
+            }
+            this.setBallOwner(p);
+            break;
+          }
         }
       }
     }
