@@ -238,7 +238,9 @@ export class GameEngineService {
       vy = (p.endY - p.startY) / (p.duration / 1000);
       // Adaptive higher-frequency logging during fast passes to reduce perceived teleportation
       const nowLog = Date.now();
-      const passLogInterval = 60; // ms while ball is mid-flight
+      // Reduce spam: dynamic logging interval based on remaining time
+      // Faster early logging, slower near completion
+      const passLogInterval = t < 0.3 ? 70 : (t < 0.7 ? 110 : 160);
       if (nowLog - this.lastBallLogTime >= passLogInterval) {
         console.log(`➡️ Pass flight t=${(t*100).toFixed(0)}% at (${x.toFixed(0)},${y.toFixed(0)})`);
         this.lastBallLogTime = nowLog;
@@ -303,7 +305,8 @@ export class GameEngineService {
         vy *= 0.2;
         // Check if target is close enough to receive immediately
         const distToTarget = Math.hypot(p.target.position.x - x, p.target.position.y - y);
-        if (distToTarget < 15) {
+        // Complete only when truly at receiver (tightened threshold) to avoid early large easing jumps
+        if (distToTarget < 10) {
           // Target is close, give them the ball and emit completed pass
           this.emitEvent('pass', this.teamOfPlayer(p.target).name, p.target.name, `${p.passer.name} completes ${passType} to ${p.target.name}`, { startX: p.startX, startY: p.startY, endX: x, endY: y, subtype: passType, result: 'complete', role: p.target.role });
           this.setBallOwner(p.target);
@@ -344,8 +347,14 @@ export class GameEngineService {
           const ease = easeBase + easeScale * normalized;   // final easing multiplier
 
           // Apply easing movement
-          x += dxOwner * ease;
-          y += dyOwner * ease;
+          const moveX = dxOwner * ease;
+          const moveY = dyOwner * ease;
+          // Clamp max per-frame movement to avoid giant visual leaps when ownership switches far
+          const maxStep = 14; // px
+          const stepDist = Math.hypot(moveX, moveY);
+          const clampFactor = stepDist > maxStep ? (maxStep / stepDist) : 1;
+          x += moveX * clampFactor;
+          y += moveY * clampFactor;
 
           // Derive pseudo velocity (useful if later we add spin/deflections)
           vx = dxOwner * ease * 60 / 1000; // scaled per second (approx)
@@ -720,9 +729,9 @@ export class GameEngineService {
       if (this.pendingPass) {
         const p = this.pendingPass;
         const t = Math.min(1, (Date.now() - p.startTime) / p.duration);
-        // Only allow pickup after 70% of flight OR if receiver is very close (<12px)
-        passPickupAllowed = t >= 0.7;
         passTargetId = p.target.id;
+        // Allow pickup later (>=85%) or physically very close (<8px) to ensure ball visually reaches area first
+        passPickupAllowed = t >= 0.85;
       }
       // First check if any goalkeeper can reach the ball in their defensive area
       for (const p of allPlayers.filter(pl => pl.role === 'goalkeeper')) {
@@ -751,11 +760,11 @@ export class GameEngineService {
       for (const p of allPlayers.filter(pl => pl.role !== 'goalkeeper')) {
         const dist = Math.hypot(p.position.x - ball.x, p.position.y - ball.y);
         if (dist < 8) {
-          if (!this.pendingPass || passPickupAllowed || p.id === passTargetId) {
-            // If it's the intended receiver and we're earlier than 70%, finalize pass early
+          if (!this.pendingPass || passPickupAllowed || (p.id === passTargetId && dist < 8 && passPickupAllowed)) {
             if (this.pendingPass && p.id === passTargetId) {
+              // Pass finished naturally (late phase)
               const pass = this.pendingPass;
-              this.emitEvent('pass', this.teamOfPlayer(pass.target).name, pass.target.name, `${pass.passer.name} (early control) ${pass.type} to ${pass.target.name}`, { startX: pass.startX, startY: pass.startY, endX: ball.x, endY: ball.y, subtype: pass.type, result: 'complete', role: pass.target.role });
+              this.emitEvent('pass', this.teamOfPlayer(pass.target).name, pass.target.name, `${pass.passer.name} completes ${pass.type} to ${pass.target.name}`, { startX: pass.startX, startY: pass.startY, endX: ball.x, endY: ball.y, subtype: pass.type, result: 'complete', role: pass.target.role });
               this.pendingPass = null;
             }
             this.setBallOwner(p);
